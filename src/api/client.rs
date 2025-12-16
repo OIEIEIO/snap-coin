@@ -1,6 +1,4 @@
-use std::{
-    net::{SocketAddr},
-};
+use std::net::SocketAddr;
 
 use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
 
@@ -8,7 +6,9 @@ use crate::{
     api::requests::{Request, RequestResponseError, Response},
     blockchain_data_provider::{BlockchainDataProvider, BlockchainDataProviderError},
     core::{
-        block::Block, blockchain::BlockchainError, transaction::{Transaction, TransactionId, TransactionOutput}
+        block::Block,
+        blockchain::BlockchainError,
+        transaction::{Transaction, TransactionId, TransactionOutput},
     },
     crypto::{Hash, keys::Public},
 };
@@ -32,34 +32,59 @@ impl Client {
         let request_bytes = request.encode()?;
 
         self.stream
-            .lock().await
-            .write_all(&request_bytes).await
+            .lock()
+            .await
+            .write_all(&request_bytes)
+            .await
             .map_err(|_| RequestResponseError::Stream)?;
 
         Response::decode_from_stream(&mut *self.stream.lock().await).await
     }
 
     /// Submit a new block to the network
-    pub async fn submit_block(&self, new_block: Block) -> Result<Result<(), BlockchainError>, BlockchainDataProviderError> {
+    pub async fn submit_block(
+        &self,
+        new_block: Block,
+    ) -> Result<Result<(), BlockchainError>, BlockchainDataProviderError> {
         match self.fetch(Request::NewBlock { new_block }).await? {
             Response::NewBlock { status } => Ok(status),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }
 
     /// submit a new transaction to the network
-    pub async fn submit_transaction(&self, new_transaction: Transaction) -> Result<Result<(), BlockchainError>, BlockchainDataProviderError> {
-        match self.fetch(Request::NewTransaction { new_transaction }).await? {
+    pub async fn submit_transaction(
+        &self,
+        new_transaction: Transaction,
+    ) -> Result<Result<(), BlockchainError>, BlockchainDataProviderError> {
+        match self
+            .fetch(Request::NewTransaction { new_transaction })
+            .await?
+        {
             Response::NewTransaction { status } => Ok(status),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }
 
     /// Get current full mempool
     pub async fn get_mempool(&self) -> Result<Vec<Transaction>, BlockchainDataProviderError> {
-        match self.fetch(Request::Mempool).await? {
-            Response::Mempool { mempool } => Ok(mempool),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+        let mut mempool = vec![];
+        let mut page = 0;
+        loop {
+            match self.fetch(Request::Mempool { page }).await? {
+                Response::Mempool {
+                    mempool: mempool_page,
+                    next_page,
+                } => {
+                    mempool.extend_from_slice(&mempool_page);
+                    if let Some(next_page) = next_page {
+                        page = next_page;
+                    } else {
+                        return Ok(mempool);
+                    }
+                }
+                _ => return Err(RequestResponseError::IncorrectResponse.into()),
+            }
         }
     }
 
@@ -67,7 +92,7 @@ impl Client {
     pub async fn get_balance(&self, address: Public) -> Result<u64, BlockchainDataProviderError> {
         match self.fetch(Request::Balance { address }).await? {
             Response::Balance { balance } => Ok(balance),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }
 
@@ -75,26 +100,53 @@ impl Client {
     pub async fn get_peers(&self) -> Result<Vec<SocketAddr>, BlockchainDataProviderError> {
         match self.fetch(Request::Peers).await? {
             Response::Peers { peers } => Ok(peers),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }
 
     /// Get transaction, indexed by a transaction id
     /// Returns option
-    pub async fn get_transaction(&self, transaction_id: &TransactionId) -> Result<Option<Transaction>, BlockchainDataProviderError> {
-        match self.fetch(Request::Transaction { transaction_id: *transaction_id }).await? {
+    pub async fn get_transaction(
+        &self,
+        transaction_id: &TransactionId,
+    ) -> Result<Option<Transaction>, BlockchainDataProviderError> {
+        match self
+            .fetch(Request::Transaction {
+                transaction_id: *transaction_id,
+            })
+            .await?
+        {
             Response::Transaction { transaction } => Ok(transaction),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }
 
-
     /// Get all associated transactions of a public address
     /// Returns vector of transaction hashes
-    pub async fn get_transactions_of_address(&self, address: &Public) -> Result<Vec<Hash>, BlockchainDataProviderError> {
-        match self.fetch(Request::TransactionsOfAddress { address: *address }).await? {
-            Response::TransactionsOfAddress { transactions } => Ok(transactions),
-            _ => Err(RequestResponseError::IncorrectResponse.into())
+    pub async fn get_transactions_of_address(
+        &self,
+        address: Public,
+    ) -> Result<Vec<Hash>, BlockchainDataProviderError> {
+        let mut transactions = vec![];
+        let mut page = 0;
+        loop {
+            match self
+                .fetch(Request::TransactionsOfAddress { address, page })
+                .await?
+            {
+                Response::TransactionsOfAddress {
+                    transactions: transactions_page,
+                    next_page,
+                } => {
+                    transactions.extend_from_slice(&transactions_page);
+                    if let Some(next_page) = next_page {
+                        page = next_page;
+                    } else {
+                        return Ok(transactions);
+                    }
+                }
+                _ => return Err(RequestResponseError::IncorrectResponse.into()),
+            }
         }
     }
 }
@@ -119,9 +171,12 @@ impl BlockchainDataProvider for Client {
         &self,
         height: usize,
     ) -> Result<Option<Block>, BlockchainDataProviderError> {
-        match self.fetch(Request::BlockHash {
-            height: height as u64,
-        }).await? {
+        match self
+            .fetch(Request::BlockHash {
+                height: height as u64,
+            })
+            .await?
+        {
             Response::BlockHash { hash } => match hash {
                 Some(hash) => match self.fetch(Request::Block { block_hash: hash }).await? {
                     Response::Block { block } => Ok(block),
@@ -133,7 +188,10 @@ impl BlockchainDataProvider for Client {
         }
     }
 
-    async fn get_block_by_hash(&self, hash: &Hash) -> Result<Option<Block>, BlockchainDataProviderError> {
+    async fn get_block_by_hash(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<Block>, BlockchainDataProviderError> {
         match self.fetch(Request::Block { block_hash: *hash }).await? {
             Response::Block { block } => Ok(block),
             _ => Err(RequestResponseError::IncorrectResponse.into()),
@@ -154,9 +212,12 @@ impl BlockchainDataProvider for Client {
         &self,
         height: usize,
     ) -> Result<Option<Hash>, BlockchainDataProviderError> {
-        match self.fetch(Request::BlockHash {
-            height: height as u64,
-        }).await? {
+        match self
+            .fetch(Request::BlockHash {
+                height: height as u64,
+            })
+            .await?
+        {
             Response::BlockHash { hash } => Ok(hash),
             _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
@@ -186,9 +247,26 @@ impl BlockchainDataProvider for Client {
         &self,
         address: Public,
     ) -> Result<Vec<(TransactionId, TransactionOutput, usize)>, BlockchainDataProviderError> {
-        match self.fetch(Request::AvailableUTXOs { address }).await? {
-            Response::AvailableUTXOs { available_inputs } => Ok(available_inputs),
-            _ => Err(RequestResponseError::IncorrectResponse.into()),
+        let mut outputs = vec![];
+        let mut page = 0;
+        loop {
+            match self
+                .fetch(Request::AvailableUTXOs { address, page })
+                .await?
+            {
+                Response::AvailableUTXOs {
+                    available_inputs,
+                    next_page,
+                } => {
+                    outputs.extend_from_slice(&available_inputs);
+                    if let Some(next_page) = next_page {
+                        page = next_page;
+                    } else {
+                        return Ok(outputs);
+                    }
+                }
+                _ => return Err(RequestResponseError::IncorrectResponse.into()),
+            }
         }
     }
 }

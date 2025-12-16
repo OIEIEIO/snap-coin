@@ -39,12 +39,12 @@ pub enum Request {
     BlockHash { height: u64 },
     BlockHeight { hash: Hash },
     Transaction { transaction_id: TransactionId },
-    TransactionsOfAddress { address: Public },
-    AvailableUTXOs { address: Public },
+    TransactionsOfAddress { address: Public, page: u32 },
+    AvailableUTXOs { address: Public, page: u32 },
     Balance { address: Public },
     Reward,
     Peers,
-    Mempool,
+    Mempool { page: u32 },
     NewBlock { new_block: Block },
     NewTransaction { new_transaction: Transaction },
 }
@@ -69,9 +69,7 @@ impl Request {
     }
 
     /// Blocking deserialize from TcpStream
-    pub async fn decode_from_stream(
-        stream: &mut TcpStream,
-    ) -> Result<Self, RequestResponseError> {
+    pub async fn decode_from_stream(stream: &mut TcpStream) -> Result<Self, RequestResponseError> {
         let mut size_buf = [0u8; 2];
         stream
             .read_exact(&mut size_buf)
@@ -116,9 +114,11 @@ pub enum Response {
     },
     TransactionsOfAddress {
         transactions: Vec<TransactionId>,
+        next_page: Option<u32>,
     },
     AvailableUTXOs {
         available_inputs: Vec<(TransactionId, TransactionOutput, usize)>,
+        next_page: Option<u32>,
     },
     Balance {
         balance: u64,
@@ -131,6 +131,7 @@ pub enum Response {
     },
     Mempool {
         mempool: Vec<Transaction>,
+        next_page: Option<u32>,
     },
     NewBlock {
         status: Result<(), BlockchainError>,

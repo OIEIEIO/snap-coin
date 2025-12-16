@@ -109,25 +109,60 @@ impl Peer {
         tokio::spawn(async move {
             let peer_cloned = peer.clone();
             let node_cloned = node.clone();
-
             // Spawn ping / pong task
             let pinger = {
-                let peer = peer.clone();
-                let node = node.clone();
+                let peer_outer = peer.clone();
+                let node_outer = node.clone();
+
                 Box::pin(async move {
                     loop {
-                        sleep(Duration::from_secs(5)).await; // 5 second ping interval
-                        let height = node.read().await.blockchain.get_height();
-                        match Peer::request(
-                            // Send Ping and wait for Pong
-                            peer.clone(),
+                        sleep(Duration::from_secs(5)).await;
+
+                        let height = node_outer.read().await.blockchain.get_height();
+
+                        let response = Peer::request(
+                            peer_outer.clone(),
                             Message::new(Command::Ping { height }),
                         )
-                        .await?
-                        .command
-                        {
-                            Command::Pong { .. } => {}
-                            _ => {}
+                        .await?;
+
+                        if let Command::Pong { height } = response.command {
+                            let local_height = node_outer.read().await.blockchain.get_height();
+
+                            if local_height < height {
+                                let node_for_task = node_outer.clone();
+                                let peer_for_task = peer_outer.clone();
+
+                                tokio::spawn(async move {
+                                    if node_for_task.read().await.is_syncing {
+                                        return;
+                                    }
+
+                                    node_for_task.write().await.is_syncing = true;
+
+                                    let result = sync_to_peer(
+                                        node_for_task.clone(),
+                                        peer_for_task.clone(),
+                                        height,
+                                    )
+                                    .await;
+
+                                    if let Err(e) = result {
+                                        Node::log(format!(
+                                            "[SYNC] Failed: {}, disconnecting from {}",
+                                            e,
+                                            peer_for_task.read().await.address
+                                        ));
+
+                                        let node_for_task = node_for_task.clone();
+                                        Peer::on_fail(peer_for_task, node_for_task).await;
+                                    } else {
+                                        Node::log("[SYNC] Completed".to_string());
+                                    }
+
+                                    node_for_task.write().await.is_syncing = false;
+                                });
+                            }
                         }
                     }
                     #[allow(unreachable_code)]
@@ -195,8 +230,6 @@ impl Peer {
                     peer.read().await.address.port(),
                     e
                 ));
-                let peer_cloned = peer_cloned.clone();
-                let node_cloned = node_cloned.clone();
 
                 tokio::spawn(async move {
                     Self::on_fail(peer_cloned, node_cloned).await;
@@ -229,37 +262,14 @@ impl Peer {
                 Command::AcknowledgeConnection => {
                     Node::log(format!("Got unhandled AcknowledgeConnection"));
                 }
-                Command::Ping { height } => {
-                    let local_height = node.read().await.blockchain.get_height();
+                Command::Ping { height: _ } => {
                     Peer::send(
                         peer.clone(),
                         message.make_response(Command::Pong {
-                            height: local_height,
+                            height: node.read().await.blockchain.get_height(),
                         }),
                     )
                     .await;
-
-                    if local_height < height {
-                        tokio::spawn(async move {
-                            if node.read().await.is_syncing {
-                                return;
-                            }
-                            node.write().await.is_syncing = true;
-                            let result = sync_to_peer(node.clone(), peer.clone(), height).await;
-
-                            if let Err(e) = result {
-                                Node::log(format!("[SYNC] Failed: {}, disconnecting from {}", e, peer.read().await.address));
-                                let node = node.clone();
-                                tokio::spawn(async move {
-                                    Peer::on_fail(peer, node).await;
-                                });
-                            } else {
-                                Node::log(format!("[SYNC] Completed"));
-                            }
-
-                            node.write().await.is_syncing = false;
-                        });
-                    }
                 }
                 Command::Pong { .. } => {
                     Node::log(format!("Got unhandled Pong"));

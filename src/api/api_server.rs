@@ -11,9 +11,12 @@ use tokio::{
 use crate::{
     api::requests::{Request, Response},
     blockchain_data_provider::BlockchainDataProvider,
+    core::utils::slice_vec,
     economics::get_block_reward,
     node::node::Node,
 };
+
+pub const PAGE_SIZE: u32 = 200;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -74,13 +77,15 @@ impl Server {
 
                         Response::Transaction { transaction: found }
                     }
-                    Request::TransactionsOfAddress { address } => {
+                    Request::TransactionsOfAddress {
+                        address,
+                        page: requested_page,
+                    } => {
                         let node_guard = node.read().await;
                         let mut transactions = vec![];
 
                         for block_hash in node_guard.blockchain.get_all_blocks() {
-                            if let Some(block) =
-                                node_guard.blockchain.get_block_by_hash(block_hash)
+                            if let Some(block) = node_guard.blockchain.get_block_by_hash(block_hash)
                             {
                                 for transaction in block.transactions {
                                     if transaction.outputs.iter().any(|i| i.receiver == address) {
@@ -90,15 +95,48 @@ impl Server {
                                 }
                             }
                         }
-                        Response::TransactionsOfAddress { transactions }
+
+                        let page = slice_vec(
+                            &transactions,
+                            (requested_page * PAGE_SIZE) as usize,
+                            ((requested_page + 1) * PAGE_SIZE) as usize,
+                        );
+                        let next_page = if page.len() != PAGE_SIZE as usize {
+                            None
+                        } else {
+                            Some(requested_page + 1)
+                        };
+
+                        Response::TransactionsOfAddress {
+                            transactions: page.to_vec(),
+                            next_page,
+                        }
                     }
-                    Request::AvailableUTXOs { address } => Response::AvailableUTXOs {
-                        available_inputs: node
+                    Request::AvailableUTXOs {
+                        address,
+                        page: requested_page,
+                    } => {
+                        let available = node
                             .read()
                             .await
                             .blockchain
-                            .get_available_transaction_outputs(address).await?,
-                    },
+                            .get_available_transaction_outputs(address)
+                            .await?;
+                        let page = slice_vec(
+                            &available,
+                            (requested_page * PAGE_SIZE) as usize,
+                            ((requested_page + 1) * PAGE_SIZE) as usize,
+                        );
+                        let next_page = if page.len() != PAGE_SIZE as usize {
+                            None
+                        } else {
+                            Some(requested_page + 1)
+                        };
+                        Response::AvailableUTXOs {
+                            available_inputs: page.to_vec(),
+                            next_page
+                        }
+                    }
                     Request::Balance { address } => Response::Balance {
                         balance: node
                             .read()
@@ -119,9 +157,26 @@ impl Server {
                         }
                         Response::Peers { peers }
                     }
-                    Request::Mempool => Response::Mempool {
-                        mempool: node.read().await.mempool.get_mempool().await,
-                    },
+                    Request::Mempool {
+                        page: requested_page,
+                    } => {
+                        let mempool = node.read().await.mempool.get_mempool().await;
+                        let page = slice_vec(
+                            &mempool,
+                            (requested_page * PAGE_SIZE) as usize,
+                            ((requested_page + 1) * PAGE_SIZE) as usize,
+                        );
+                        let next_page = if page.len() != PAGE_SIZE as usize {
+                            None
+                        } else {
+                            Some(requested_page + 1)
+                        };
+
+                        Response::Mempool {
+                            mempool: page.to_vec(),
+                            next_page,
+                        }
+                    }
                     Request::NewBlock { new_block } => Response::NewBlock {
                         status: Node::submit_block(node.clone(), new_block).await,
                     },

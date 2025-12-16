@@ -504,7 +504,7 @@ pub fn validate_transaction_timestamp_in_block(
 
 /// Returns true if transaction timestamp is valid in the context of current time
 pub fn validate_transaction_timestamp(transaction: &Transaction) -> Result<(), BlockchainError> {
-    if transaction.timestamp > chrono::Utc::now().timestamp() as u64 {
+    if transaction.timestamp - EXPIRATION_TIME > chrono::Utc::now().timestamp() as u64 {
         return Err(BlockchainError::InvalidTimestamp);
     }
     if transaction.timestamp + EXPIRATION_TIME < chrono::Utc::now().timestamp() as u64 {
@@ -516,7 +516,7 @@ pub fn validate_transaction_timestamp(transaction: &Transaction) -> Result<(), B
 
 /// Returns false if block timestamp is valid
 pub fn validate_block_timestamp(block: &Block) -> Result<(), BlockchainError> {
-    if block.timestamp > chrono::Utc::now().timestamp() as u64 {
+    if block.timestamp - EXPIRATION_TIME > chrono::Utc::now().timestamp() as u64 {
         return Err(BlockchainError::InvalidTimestamp);
     }
     if block.timestamp + EXPIRATION_TIME < chrono::Utc::now().timestamp() as u64 {
