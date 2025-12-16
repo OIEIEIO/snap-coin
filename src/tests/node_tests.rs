@@ -115,7 +115,7 @@ async fn test_api(node: Arc<RwLock<Node>>) -> Result<(), anyhow::Error> {
 #[tokio::test]
 async fn test_node() -> Result<(), anyhow::Error> {
     let node_path = "/tmp/node-".to_string() + &(random::<u64>()).to_string();
-    let node = Node::new(&node_path, 8998);
+    let node = Node::new(&node_path, 8998, vec![]);
     Node::init(node.clone(), vec![]).await?;
 
     test_mempool(node.clone()).await?;

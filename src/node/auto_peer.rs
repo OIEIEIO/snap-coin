@@ -14,7 +14,10 @@ use crate::node::{
     peer::Peer,
 };
 
-fn is_my_ip(ip: IpAddr) -> bool {
+fn is_my_ip(ip: IpAddr, reserved_ips: &Vec<IpAddr>) -> bool {
+    if reserved_ips.contains(&ip) {
+        return true;
+    }
     // Loopback check (127.0.0.1, ::1)
     if ip.is_loopback() {
         return true;
@@ -90,7 +93,7 @@ pub fn auto_peer(node: Arc<RwLock<Node>>) -> JoinHandle<()> {
 
                                 // Now we can check synchronously
                                 !peer_addresses.contains(&addr)
-                                    && !(addr.port() == guard.port && is_my_ip(addr.ip()))
+                                    && !(addr.port() == guard.port && is_my_ip(addr.ip(), &node.read().await.reserved_ips))
                             };
 
                             if !should_connect {

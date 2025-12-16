@@ -1,5 +1,6 @@
 use num_bigint::BigUint;
 use std::io::{Read, Write};
+use std::net::IpAddr;
 use std::{
     fs,
     net::SocketAddr,
@@ -55,19 +56,17 @@ pub struct Node {
     pub blockchain: Blockchain,
     pub mempool: MemPool,
     pub last_seen_block: Hash,
-
+    pub reserved_ips: Vec<IpAddr>,
     // Synchronization flag
     pub is_syncing: bool,
-
     pub target_peers: usize,
-
     pub port: u16,
 }
 
 impl Node {
     /// Create a new blockchain (load / create) with default 12 nodes target
     /// WARNING: Only one instance of this struct can exist in one program
-    pub fn new(node_path: &str, port: u16) -> Arc<RwLock<Self>> {
+    pub fn new(node_path: &str, port: u16, reserved_ips: Vec<IpAddr>) -> Arc<RwLock<Self>> {
         NODE_PATH
             .set(String::from(node_path))
             .expect("Only one node can exist at once!");
@@ -94,6 +93,7 @@ impl Node {
             is_syncing: false,
             target_peers: 12,
             port,
+            reserved_ips,
             last_seen_block: Hash::new_from_buf([0u8; 32]),
         }))
     }
