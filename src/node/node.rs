@@ -1,297 +1,173 @@
+use flexi_logger::{Duplicate, FileSpec, Logger};
+use futures::future::join_all;
+use log::{error, info};
 use num_bigint::BigUint;
-use std::io::{Read, Write};
-use std::net::IpAddr;
-use std::{
-    fs,
-    net::SocketAddr,
-    sync::{Arc, OnceLock},
-};
-use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::{
-    sync::RwLock,
-    task::{JoinError, JoinHandle},
+use std::{
+    net::SocketAddr, path::PathBuf, sync::{Arc, Once}
 };
 
-use crate::crypto::Hash;
-use crate::node::auto_peer::auto_peer;
-use crate::node::server::ServerError;
 use crate::{
     core::{
         block::Block,
-        blockchain::{
-            Blockchain, BlockchainError, validate_block_timestamp, validate_transaction_timestamp,
-        },
+        blockchain::{self, Blockchain, BlockchainError},
         transaction::Transaction,
     },
     node::{
-        mempool::MemPool,
         message::{Command, Message},
-        peer::{Peer, PeerError},
-        server::Server,
+        node_state::{NodeState, SharedNodeState},
+        peer::{self, PeerError, PeerHandle, create_peer, kill_peer},
     },
 };
 
-/// Path at which this blockchain is being read and written from and too. This enforces a singleton rule where only one node can exist in one program at once
-static NODE_PATH: OnceLock<String> = OnceLock::new();
+pub type SharedBlockchain = Arc<Blockchain>;
 
-#[derive(Error, Debug)]
-pub enum NodeError {
-    #[error("{0}")]
-    PeerError(#[from] PeerError),
+static LOGGER_INIT: Once = Once::new();
 
-    #[error("TCP error: {0}")]
-    IOError(#[from] std::io::Error),
-
-    #[error("Join error: {0}")]
-    JoinError(#[from] JoinError),
-
-    #[error("Server error: {0}")]
-    ServerError(#[from] super::server::ServerError),
-}
-
-/// Handles incoming connections and outbound peers
 pub struct Node {
-    pub peers: Vec<Arc<RwLock<Peer>>>,
-    pub blockchain: Blockchain,
-    pub mempool: MemPool,
-    pub last_seen_block: Hash,
-    pub reserved_ips: Vec<IpAddr>,
-    // Synchronization flag
-    pub is_syncing: bool,
-    pub target_peers: usize,
-    pub port: u16,
+    pub node_state: SharedNodeState,
+    pub blockchain: SharedBlockchain,
 }
 
 impl Node {
-    /// Create a new blockchain (load / create) with default 12 nodes target
-    /// WARNING: Only one instance of this struct can exist in one program
-    pub fn new(node_path: &str, port: u16, reserved_ips: Vec<IpAddr>) -> Arc<RwLock<Self>> {
-        NODE_PATH
-            .set(String::from(node_path))
-            .expect("Only one node can exist at once!");
-        // Clear log file
-        if !fs::exists(node_path).expect("failed to check if blockchain dir exists") {
-            fs::create_dir(node_path).expect("Could not create blockchain directory");
-        }
-        fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(
-                NODE_PATH
-                    .get()
-                    .expect("One blockchain instance must exist before logging")
-                    .to_owned()
-                    + "/info.log",
-            )
-            .expect("Could not open logging file!");
-        Arc::new(RwLock::new(Node {
-            peers: vec![],
-            blockchain: Blockchain::new(node_path),
-            mempool: MemPool::new(),
-            is_syncing: false,
-            target_peers: 12,
-            port,
-            reserved_ips,
-            last_seen_block: Hash::new_from_buf([0u8; 32]),
-        }))
-    }
+    pub fn new(node_path: &str) -> Node {
+        let node_path = PathBuf::from(node_path);
 
-    /// Connect to a specified peer
-    pub async fn connect_peer(
-        node: Arc<RwLock<Node>>,
-        address: SocketAddr,
-    ) -> Result<(Arc<RwLock<Peer>>, JoinHandle<Result<(), PeerError>>), NodeError> {
-        let peer: Arc<RwLock<Peer>> = Arc::new(RwLock::new(Peer::new(address, false)));
-        let stream = TcpStream::connect(address).await?;
+        // Only initialize the logger once
+        LOGGER_INIT.call_once(|| {
+            let log_path = node_path.join("logs");
+            std::fs::create_dir_all(&log_path).expect("Failed to create log directory");
 
-        let handle = Peer::connect(peer.clone(), node, stream).await;
+            Logger::try_with_str("info")
+                .unwrap()
+                .log_to_file(FileSpec::default().directory(&log_path))
+                .duplicate_to_stderr(Duplicate::Info)
+                .start()
+                .ok(); // Ignore errors if logger is already set
 
-        Ok((peer, handle))
-    }
+            info!("Logger initialized for node at {:?}", node_path);
+        });
 
-    /// Initialize this node, with a array of seed nodes which this node will use to connect to
-    /// Starts all handlers
-    /// WARNING: Can only be called once
-    pub async fn init(
-        node: Arc<RwLock<Node>>,
-        seed_nodes: Vec<SocketAddr>,
-    ) -> Result<JoinHandle<Result<(), ServerError>>, NodeError> {
-        let mut peers = Vec::new();
+        let node_state = NodeState::new_empty();
+        node_state.mempool.start_expiry_watchdog();
 
-        for addr in seed_nodes {
-            let (peer, _) = Self::connect_peer(node.clone(), addr).await?;
-            peers.push(peer);
-        }
-
-        node.write().await.peers = peers;
-
-        let server_handle: JoinHandle<Result<(), super::server::ServerError>> =
-            Server.init(node.clone(), node.read().await.port).await;
-
-        let node = node.clone();
-        auto_peer(node.clone());
-        node.read().await.mempool.start_expiry_watchdog();
-
-        Ok(server_handle)
-    }
-
-    /// Send some message to all peers
-    pub async fn send_to_peers(node: Arc<RwLock<Node>>, message: Message) {
-        for i_peer in &node.read().await.peers {
-            Peer::send(Arc::clone(i_peer), message.clone()).await;
+        Node {
+            blockchain: Arc::new(Blockchain::new(
+                node_path
+                    .join("blockchain")
+                    .to_str()
+                    .expect("Failed to create node path"),
+            )),
+            node_state,
         }
     }
 
-    /// Submit a new block to the network
-    pub async fn submit_block(
-        node: Arc<RwLock<Node>>,
-        new_block: Block,
-    ) -> Result<(), BlockchainError> {
-        node.write().await.last_seen_block = new_block.meta.hash.unwrap();
-        
-        node.write().await.blockchain.add_block(new_block.clone())?;
-        validate_block_timestamp(&new_block)?;
+    pub async fn connect_peer(&self, address: SocketAddr) -> Result<PeerHandle, PeerError> {
+        let stream = TcpStream::connect(address).await.map_err(|e| PeerError::Io(format!("IO error: {e}")))?;
 
-        // Remove transactions from mempool
-        node.write()
-            .await
-            .mempool
-            .spend_transactions(
-                new_block
-                    .transactions
-                    .iter()
-                    .map(|block_transaction| block_transaction.transaction_id.unwrap())
-                    .collect(),
-            )
-            .await;
+        let handle = create_peer(stream, self.blockchain.clone(), self.node_state.clone(), false)?;
+        self.node_state.connected_peers.write().await.insert(address, handle.clone());
 
-        Node::send_to_peers(
-            node.clone(),
-            Message::new(Command::NewBlock {
-                block: new_block.clone(),
-            }),
+        Ok(handle)
+    }
+}
+
+/// Forward a message to all peers
+pub async fn to_peers(message: Message, node_state: &SharedNodeState) {
+    let peers_snapshot: Vec<_> = node_state
+        .connected_peers
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect();
+
+    // Create a list of futures for all peers
+    let futures = peers_snapshot.into_iter().map(|peer| {
+        let message = message.clone();
+        async move {
+            if let Err(err) = peer::request_from_peer(&peer, message).await {
+                if let Err(e) = kill_peer(&peer, err.to_string()).await {
+                    error!("Failed to kill peer, error: {e}");
+                }
+            }
+        }
+    });
+
+    // Run all futures concurrently
+    join_all(futures).await;
+}
+
+/// Accept a new block to the local blockchain, and forward it to all peers
+pub async fn accept_block(
+    blockchain: &SharedBlockchain,
+    node_state: &SharedNodeState,
+    new_block: Block,
+) -> Result<(), BlockchainError> {
+    new_block.check_completeness()?;
+    let block_hash = new_block.meta.hash.unwrap(); // Unwrap is okay, we checked that block is complete
+
+    if node_state.last_seen_block() == block_hash {
+        return Ok(()); // We already processed this block
+    }
+    node_state.set_last_seen_block(block_hash);
+
+    // Validation
+    blockchain::validate_block_timestamp(&new_block)?;
+    blockchain.add_block(new_block.clone())?;
+
+    info!("New block accepted: {}", block_hash.dump_base36());
+    let node_state = node_state.clone();
+
+    // Forward to all peers (non blocking)
+    tokio::spawn(async move {
+        to_peers(
+            Message::new(Command::NewBlock { block: new_block }),
+            &node_state,
         )
         .await;
+    });
+    Ok(())
+}
 
-        Node::log(format!(
-            "New block accepted: {}",
-            new_block.meta.hash.unwrap().dump_base36()
-        ));
-        Ok(())
+/// Accept a new block to the local blockchain, and forward it to all peers
+pub async fn accept_transaction(
+    blockchain: &SharedBlockchain,
+    node_state: &SharedNodeState,
+    new_transaction: Transaction,
+) -> Result<(), BlockchainError> {
+    new_transaction.check_completeness()?;
+    let transaction_id = new_transaction.transaction_id.unwrap(); // Unwrap is okay, we checked that tx is complete
+
+    if node_state.last_seen_transaction() == transaction_id {
+        return Ok(()); // We already processed this tx
     }
+    node_state.set_last_seen_transaction(transaction_id);
 
-    /// Submit a new transaction to the network to be mined
-    pub async fn submit_transaction(
-        node: Arc<RwLock<Node>>,
-        new_transaction: Transaction,
-    ) -> Result<(), BlockchainError> {
-        let tx_difficulty =
-            BigUint::from_bytes_be(&node.read().await.blockchain.get_transaction_difficulty());
+    // Validation
+    blockchain::validate_transaction_timestamp(&new_transaction)?;
+    blockchain.get_utxos().validate_transaction(
+        &new_transaction,
+        &BigUint::from_bytes_be(&blockchain.get_transaction_difficulty()),
+    )?;
 
-        node.read()
-            .await
-            .blockchain
-            .get_utxos()
-            .validate_transaction(&new_transaction.clone(), &tx_difficulty)?;
+    node_state
+        .mempool
+        .add_transaction(new_transaction.clone())
+        .await;
 
-        if !node
-            .read()
-            .await
-            .mempool
-            .validate_transaction(&new_transaction)
-            .await
-        {
-            return Err(BlockchainError::DoubleSpend);
-        }
-        validate_transaction_timestamp(&new_transaction)?;
+    info!("New transaction accepted: {}", transaction_id.dump_base36());
+    let node_state = node_state.clone();
 
-        node.write()
-            .await
-            .mempool
-            .add_transaction(new_transaction.clone())
-            .await;
-
-        Node::send_to_peers(
-            node.clone(),
+    // Forward to all peers (non blocking)
+    tokio::spawn(async move {
+        to_peers(
             Message::new(Command::NewTransaction {
-                transaction: new_transaction.clone(),
+                transaction: new_transaction,
             }),
+            &node_state,
         )
         .await;
-        Node::log(format!(
-            "New transaction accepted: {}",
-            new_transaction.transaction_id.unwrap().dump_base36()
-        ));
-        Ok(())
-    }
-
-    /// Log a message to the node log
-    pub fn log(msg: String) {
-        let mut log_file = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(
-                NODE_PATH
-                    .get()
-                    .expect("One blockchain instance must exist before logging")
-                    .to_owned()
-                    + "/info.log",
-            )
-            .expect("Could not open logging file!");
-        writeln!(
-            log_file,
-            "[{}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-            msg
-        )
-        .expect("Failed to write to logging file");
-    }
-
-    /// Get last logged line
-    pub fn get_last_log() -> String {
-        let mut log_file = fs::OpenOptions::new()
-            .read(true)
-            .open(
-                NODE_PATH
-                    .get()
-                    .expect("One blockchain instance must exist before logging")
-                    .to_owned()
-                    + "/info.log",
-            )
-            .expect("Could not open logging file!");
-
-        let mut contents = String::new();
-        log_file
-            .read_to_string(&mut contents)
-            .expect("Failed to read logging file");
-
-        // Split by newlines and get the last line
-        contents.lines().last().unwrap_or("").to_string()
-    }
-
-    /// Get last popped line
-    pub fn pop_last_line() -> Option<String> {
-        let path = NODE_PATH
-            .get()
-            .expect("One blockchain instance must exist before logging")
-            .to_owned()
-            + "/info.log";
-
-        // Read the full log
-        let contents = fs::read_to_string(&path).ok()?;
-
-        // Split into lines
-        let mut lines: Vec<&str> = contents.lines().collect();
-
-        // Pop the last line
-        let last_line = lines.pop().map(|s| s.to_string());
-
-        // Write back the remaining lines
-        let new_contents = lines.join("\n");
-        fs::write(&path, new_contents).ok()?;
-
-        last_line
-    }
+    });
+    Ok(())
 }

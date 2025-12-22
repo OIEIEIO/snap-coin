@@ -21,7 +21,10 @@ pub mod core;
 pub mod crypto;
 
 /// Node struct for hosting a P2P Snap Coin node
-pub mod nodev2;
+pub mod node;
+
+/// A struct for interacting with a node instance through the Snap Coin API
+pub mod api;
 
 /// Tests
 mod tests;
@@ -36,8 +39,15 @@ pub use economics::to_nano;
 
 use crate::{
     blockchain_data_provider::{BlockchainDataProvider, BlockchainDataProviderError},
-    core::{block::MAX_TRANSACTIONS, transaction::MAX_TRANSACTION_IO},
-    crypto::keys::{Private, Public},
+    core::{
+        block::MAX_TRANSACTIONS,
+        transaction::{MAX_TRANSACTION_IO, TransactionError},
+    },
+    crypto::{
+        address_inclusion_filter::{AddressInclusionFilter, AddressInclusionFilterError},
+        keys::{Private, Public},
+        merkle_tree::MerkleTree,
+    },
     economics::GENESIS_PREVIOUS_BLOCK_HASH,
 };
 
@@ -45,6 +55,9 @@ use crate::{
 pub enum UtilError {
     #[error("Blockchain error: {0}")]
     BlockchainError(#[from] BlockchainError),
+
+    #[error("Transaction error: {0}")]
+    TransactionError(#[from] TransactionError),
 
     #[error("Insufficient funds to complete operation")]
     InsufficientFunds,
@@ -62,6 +75,9 @@ pub enum UtilError {
 
     #[error("Too many transactions for block")]
     TooManyTransactions,
+
+    #[error("Address inclusion filter error: {0}")]
+    AddressInclusionFilter(#[from] AddressInclusionFilterError),
 }
 
 /// Build a new transactions, sending from sender to receiver where each receiver has a amount to receive attached. Takes biggest coins first.
@@ -70,8 +86,7 @@ pub async fn build_transaction<B>(
     blockchain_data_provider: &B,
     sender: Private,
     mut receivers: Vec<(Public, u64)>,
-    ignore_inputs: Vec<TransactionInput>
-    
+    ignore_inputs: Vec<TransactionInput>,
 ) -> Result<Transaction, UtilError>
 where
     B: BlockchainDataProvider,
@@ -84,7 +99,11 @@ where
         .get_available_transaction_outputs(sender.to_public())
         .await?;
 
-    available_inputs.retain(|(transaction, _, index)| !ignore_inputs.iter().any(|i_input| i_input.output_index == *index && i_input.transaction_id == *transaction));
+    available_inputs.retain(|(transaction, _, index)| {
+        !ignore_inputs
+            .iter()
+            .any(|i_input| i_input.output_index == *index && i_input.transaction_id == *transaction)
+    });
 
     let mut used_inputs = vec![];
 
@@ -118,6 +137,7 @@ where
                 transaction_id: input.0,
                 output_index: input.2,
                 signature: None,
+                output_owner: sender.to_public(),
             })
             .collect::<Vec<TransactionInput>>(),
         receivers
@@ -146,7 +166,9 @@ where
     B: BlockchainDataProvider,
 {
     let reward = get_block_reward(blockchain_data_provider.get_height().await?);
+
     let mut transactions = transactions.clone();
+
     transactions.push(Transaction::new_transaction_now(
         vec![],
         vec![
@@ -161,6 +183,7 @@ where
         ],
         &mut vec![],
     )?);
+
     if transactions.len() > MAX_TRANSACTIONS {
         return Err(UtilError::TooManyTransactions);
     }
@@ -171,21 +194,35 @@ where
             .await?,
         None,
     )?;
+
+    let mut ids = vec![];
+    for tx in &transactions {
+        tx.check_completeness()?;
+        ids.push(tx.transaction_id.unwrap());
+    }
+    let merkle_tree = MerkleTree::build(&ids);
+
+    let filter = AddressInclusionFilter::create_filter(&transactions)?;
+
+    let previous_block = blockchain_data_provider
+        .get_block_hash_by_height(
+            blockchain_data_provider
+                .get_height()
+                .await?
+                .saturating_sub(1),
+        )
+        .await?
+        .unwrap_or(GENESIS_PREVIOUS_BLOCK_HASH);
+
     let block = Block::new_block_now(
         transactions,
         &blockchain_data_provider.get_block_difficulty().await?,
         &blockchain_data_provider
             .get_transaction_difficulty()
             .await?,
-        blockchain_data_provider
-            .get_block_hash_by_height(
-                blockchain_data_provider
-                    .get_height()
-                    .await?
-                    .saturating_sub(1),
-            )
-            .await?
-            .unwrap_or(GENESIS_PREVIOUS_BLOCK_HASH),
+        previous_block,
+        &merkle_tree.root_hash(),
+        filter,
     );
 
     Ok(block)

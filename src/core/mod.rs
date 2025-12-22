@@ -16,5 +16,8 @@ pub mod economics;
 /// Core block struct, defines a block and all of its parameters
 pub mod block;
 
-/// A struct for keeping, and updating network and transaction difficulty (POW)
+/// Keeps, and updates network and transaction difficulty (POW)
 pub mod difficulty;
+
+/// Access block data and metadata
+pub mod block_store;

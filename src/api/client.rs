@@ -190,9 +190,9 @@ impl BlockchainDataProvider for Client {
 
     async fn get_block_by_hash(
         &self,
-        hash: &Hash,
+        hash: Hash,
     ) -> Result<Option<Block>, BlockchainDataProviderError> {
-        match self.fetch(Request::Block { block_hash: *hash }).await? {
+        match self.fetch(Request::Block { block_hash }).await? {
             Response::Block { block } => Ok(block),
             _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
@@ -200,9 +200,9 @@ impl BlockchainDataProvider for Client {
 
     async fn get_height_by_hash(
         &self,
-        hash: &Hash,
+        hash: Hash,
     ) -> Result<Option<usize>, BlockchainDataProviderError> {
-        match self.fetch(Request::BlockHeight { hash: *hash }).await? {
+        match self.fetch(Request::BlockHeight { hash }).await? {
             Response::BlockHeight { height } => Ok(height),
             _ => Err(RequestResponseError::IncorrectResponse.into()),
         }

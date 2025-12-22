@@ -1,20 +1,18 @@
-/// A struct that handles one connected peer and all of its connection logic, and message processing
-pub mod peer;
-
-/// The node struct
+/// The node
 pub mod node;
-
-/// A struct for serializing and deserializing p2p messages
-pub mod message;
 
 /// Stores all currently pending transactions, that are waiting to be mined
 pub mod mempool;
 
-/// Synchronize if a fork happens
+/// Stores current node state, shared between threads
+pub mod node_state;
+
+pub mod message;
+
+pub mod peer;
+
+mod on_message;
+
 mod sync;
 
-/// Host a server for other peers to connect to
-mod server;
-
-/// Automatically find and connect to different peers
-mod auto_peer;
+pub mod server;

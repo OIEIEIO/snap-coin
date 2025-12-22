@@ -1,153 +1,103 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use log::info;
 
 use crate::{
-    crypto::Hash, node::{
+    core::blockchain::BlockchainError,
+    node::{
         message::{Command, Message},
-        node::Node,
-        peer::{Peer, PeerError},
-    }
+        node::SharedBlockchain,
+        peer::{PeerHandle, request_from_peer},
+    },
 };
 
-/// Synchronize to some other peer
+#[derive(thiserror::Error, Debug)]
+pub enum SyncError {
+    #[error("Peer error: {0}")]
+    PeerError(#[from] crate::node::peer::PeerError),
+
+    #[error("Blockchain error: {0}")]
+    BlockchainError(#[from] BlockchainError),
+
+    #[error("No fork point found with peer")]
+    NoForkPoint,
+}
+
+/// Synchronize local blockchain to match peer's chain using longest chain rule with fork detection
 pub async fn sync_to_peer(
-    node: Arc<RwLock<Node>>,
-    peer: Arc<RwLock<Peer>>,
+    peer: &PeerHandle,
+    blockchain: &SharedBlockchain,
     peer_height: usize,
-) -> Result<(), PeerError> {
-    // 1. Request block hashes from the peer (No locks on Node held)
-    let start = peer_height.saturating_sub(30);
-    let block_hashes = {
-        Node::log(format!("[SYNC] Fetching block hashes from peer"));
-        let response: Message = Peer::request(
-            Arc::clone(&peer),
-            Message::new(Command::GetBlockHashes {
-                start,
-                end: peer_height,
-            }),
-        ).await?;
-        match response.command {
-            Command::GetBlockHashesResponse { block_hashes } => block_hashes,
-            _ => return Err(PeerError::SyncResponseInvalid),
-        }
-    };
-    Node::log(format!("[Sync] Fetched block hashes from peer"));
-
-    // Find fork point: Take a brief READ LOCK on Node.
-    let (fork_index, fork_height) = {
-        let node_read = node.read().await; // READ LOCK acquired
-
-        // Iterate from the peer's newest block backwards
-        let mut found: Option<(usize, usize)> = None;
-        for (i, h) in block_hashes.iter().enumerate().rev() {
-            if let Some(height) = node_read.blockchain.get_height_by_hash(h) {
-                found = Some((i, height));
-                break;
-            }
-        }
-        // READ LOCK dropped upon exiting the block
-        found.ok_or(PeerError::NoForkPoint)?
-    };
-
-    Node::log(
-        format!(
-            "[SYNC] Replacing chain to longer chain from height: {} (fork index {})",
-            fork_height, fork_index
-        ),
+) -> Result<(), SyncError> {
+    let local_height = blockchain.block_store().get_height();
+    info!(
+        "Starting sync: local height = {}, peer height = {}",
+        local_height, peer_height
     );
 
-    // New hashes are those AFTER the fork index (fork_index + 1)
-    let new_hashes = if fork_index + 1 <= block_hashes.len() {
-        &block_hashes[fork_index + 1..]
-    } else {
-        &vec![] as &[Hash]
-    };
+    // Find common ancestor (fork point), check back up to 50 blocks
+    let lookback = 50.min(local_height);
+    let mut fork_height = None;
 
-    if new_hashes.is_empty() {
-        Node::log(format!("[SYNC] Already synced!"));
-        return Ok(());
-    }
-
-    // Fetch and validate new blocks (No locks on Node held during I/O or heavy computation)
-    let mut new_blocks = Vec::with_capacity(new_hashes.len());
-    for bh in new_hashes.iter() {
-        // Request block from peer (I/O operation)
-        let block = {
-            match Peer::request(
-                Arc::clone(&peer),
-                Message::new(Command::GetBlock { block_hash: *bh }),
-            )
-            .await?
-            .command
-            {
-                Command::GetBlockResponse { block } => {
-                    block.ok_or(PeerError::SyncResponseInvalid)?
-                }
-                _ => return Err(PeerError::SyncResponseInvalid),
-            }
-        };
-
-        // Validate block meta
-        block.check_meta()?;
-
-        block.validate_difficulties(&node.read().await.blockchain.get_block_difficulty(), &node.read().await.blockchain.get_transaction_difficulty())?;
-
-        new_blocks.push(block);
-    }
-
-    // Apply blockchain changes in a single WRITE LOCK (minimizing lock holding time)
-    {
-        let mut node_guard = node.write().await; // WRITE LOCK acquired
-
-        let expected_previous_hash = node_guard
-            .blockchain
-            .get_block_hash_by_height(fork_height)
-            .ok_or(PeerError::NoForkPoint)?;
-
-        // Anti-race condition check: Verify the fork point is still valid
-        if expected_previous_hash
-            != node_guard
-                .blockchain
-                .get_block_hash_by_height(fork_height)
-                .ok_or(PeerError::NoBlockHash)?
+    info!("Searching for fork point (up to {} blocks back)", lookback);
+    for offset in 0..lookback {
+        let height_to_check = local_height.saturating_sub(offset);
+        if let Some(local_hash) = blockchain
+            .block_store()
+            .get_block_hash_by_height(height_to_check)
         {
-            Node::log(
-                format!("[SYNC] Fork point invalidated by parallel chain update. Aborting sync."),
-            );
-            // TODO: Returning a specific error like ForkPointChanged would be better if defined
-            return Err(PeerError::SyncResponseInvalid);
-        }
-
-        // Remove blocks above fork_height
-        let mut popped_blocks = 0;
-        while node_guard.blockchain.get_height() > fork_height + 1 {
-            node_guard.blockchain.pop_block()?;
-            popped_blocks += 1;
-        }
-
-        Node::log(
-            format!(
-                "[SYNC] Backed local chain to height: {}, Popped {} blocks",
-                node_guard.blockchain.get_height(),
-                popped_blocks
-            ),
-        );
-
-        // Append downloaded blocks in order
-        for block in new_blocks {
-            Node::log(format!("[SYNC] Adding block, current height: {}, Block hash: {}", node_guard.blockchain.get_height(), match block.meta.hash {
-                Some(hash) => hash.dump_base36(),
-                None => "<missing hash>".to_owned()
-            }));
-            node_guard.blockchain.add_block(block)?;
+            // Ask peer for the block at this height
+            let msg = Message::new(Command::GetBlock {
+                block_hash: local_hash,
+            });
+            if let Ok(response) = request_from_peer(peer, msg).await {
+                if let Command::GetBlockResponse {
+                    block: Some(peer_block),
+                } = response.command
+                {
+                    // If hashes match, we found the fork point
+                    if peer_block.meta.hash.unwrap() == local_hash {
+                        fork_height = Some(height_to_check);
+                        info!("Fork point found at height {}", height_to_check);
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    Node::log(
-        format!(
-            "Longest chain updated, local chain back up to {}",
-            node.read().await.blockchain.get_height()
-        ),
+    let fork_height = fork_height.ok_or(SyncError::NoForkPoint)?;
+    info!("Rolling back local chain to fork height {}", fork_height);
+
+    // Rollback local chain to fork point
+    while blockchain.block_store().get_height() > fork_height {
+        blockchain.pop_block()?;
+    }
+
+    info!("Requesting block hashes from peer at height {}", fork_height);
+    // Download and apply missing blocks from peer
+    let mut current_height = fork_height;
+    while current_height < peer_height {
+        let msg = Message::new(Command::GetBlockHashes {
+            start: current_height,
+            end: current_height + 1,
+        });
+        let response = request_from_peer(peer, msg).await?;
+        if let Command::GetBlockHashesResponse { block_hashes } = response.command {
+            if let Some(hash) = block_hashes.first() {
+                let block_msg = Message::new(Command::GetBlock { block_hash: *hash });
+                if let Command::GetBlockResponse { block: Some(block) } =
+                    request_from_peer(peer, block_msg).await?.command
+                {
+                    blockchain.add_block(block)?;
+                    info!("Added block at height {}", current_height + 1);
+                }
+            }
+        }
+        current_height += 1;
+    }
+
+    info!(
+        "Sync complete: local height now {}",
+        blockchain.block_store().get_height()
     );
     Ok(())
 }

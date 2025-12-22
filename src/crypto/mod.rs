@@ -14,6 +14,12 @@ use keys::{Private, Public};
 /// Public / Private key logic
 pub mod keys;
 
+/// Merkle tree
+pub mod merkle_tree;
+
+/// Address inclusion filter
+pub mod address_inclusion_filter;
+
 /// Argon2 configuration, includes magic bytes (the salt for hashing)
 pub struct Argon2Config {
     pub memory_cost: u32,

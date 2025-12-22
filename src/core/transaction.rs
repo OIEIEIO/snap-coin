@@ -22,6 +22,9 @@ pub enum TransactionError {
     #[error("Transaction missing ID")]
     MissingId,
 
+    #[error("Transaction missing signature/s")]
+    MissingSignatures,
+
     #[error("Transaction hash is invalid: {0}")]
     InvalidHash(String),
 
@@ -43,6 +46,9 @@ pub enum TransactionError {
     #[error("Transaction input signature is invalid for transaction {0}")]
     InvalidSignature(String),
 
+    #[error("Transaction input output owner is invalid for transaction {0}")]
+    IncorrectOutputOwner(String),
+
     #[error("Double spending detected in the same transaction {0}")]
     DoubleSpend(String),
 
@@ -54,6 +60,9 @@ pub enum TransactionError {
 
     #[error("Transaction has too many inputs or outputs")]
     TooMuchIO,
+
+    #[error("{0}")]
+    Other(String),
 }
 
 /// A transaction input, that are funding a set transaction output, that must exist in the current utxo set
@@ -62,6 +71,7 @@ pub struct TransactionInput {
     pub transaction_id: TransactionId,
     pub output_index: usize,
     pub signature: Option<Signature>,
+    pub output_owner: Public,
 }
 
 /// A transaction output, specifying the transactions set receiver
@@ -163,5 +173,33 @@ impl Transaction {
             signature_less_transaction,
             bincode::config::standard(),
         )?)
+    }
+
+    pub fn check_completeness(&self) -> Result<(), TransactionError> {
+        self.transaction_id.ok_or(TransactionError::MissingId)?;
+        for input in &self.inputs {
+            input.signature.ok_or(TransactionError::MissingSignatures)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn address_count(&self) -> usize {
+        self.inputs.len() + self.outputs.len()
+    }
+
+    /// check if this tx contains a address
+    pub fn contains_address(&self, address: Public) -> bool {
+        for input in &self.inputs {
+            if input.output_owner == address {
+                return true;
+            }
+        }
+        for output in &self.outputs {
+            if output.receiver == address {
+                return true;
+            }
+        }
+        false
     }
 }

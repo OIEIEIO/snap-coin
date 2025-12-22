@@ -1,6 +1,4 @@
-use std::{
-    array::TryFromSliceError,
-};
+use std::array::TryFromSliceError;
 
 use bincode::{Decode, Encode};
 use rand::random;
@@ -11,9 +9,7 @@ use tokio::{
 };
 
 use crate::{
-    core::{block::{Block, BlockMetadata}, transaction::{Transaction, TransactionId}},
-    crypto::{Hash, merkle_tree::MerkleTreeProof},
-    version::VERSION,
+    core::{block::Block, transaction::Transaction}, crypto::Hash, version::VERSION
 };
 
 /// Struct that contains every command (request, response) sent on the p2p network
@@ -29,21 +25,13 @@ pub enum Command {
 
     // Live
     NewBlock { block: Block },
-    NewBlockAccepted,
     NewTransaction { transaction: Transaction },
-    NewTransactionAccepted,
 
     // Historical
-    GetBlockMeta { block_hash: Hash },
-    GetBlockMetadataResponse { block_metadata: Option<BlockMetadata> },
     GetBlock { block_hash: Hash },
     GetBlockResponse { block: Option<Block> },
     GetBlockHashes { start: usize, end: usize },
     GetBlockHashesResponse { block_hashes: Vec<Hash> },
-
-    // Light node
-    GetTransactionMerkleProof { block: Hash, transaction_id: TransactionId },
-    GetTransactionMerkleProofResponse { proof: Option<MerkleTreeProof> },
 }
 
 #[derive(Error, Debug)]
@@ -64,17 +52,15 @@ pub enum MessageError {
     HeaderItemLength(#[from] TryFromSliceError),
 }
 
-pub type MessageId = u32;
-
 #[derive(Debug, Clone)]
 pub struct Message {
     pub version: u16,
-    pub id: MessageId,
+    pub id: u16,
     pub command: Command,
 }
 
 impl Message {
-    /// New
+    /// New 
     pub fn new(command: Command) -> Self {
         Message {
             version: VERSION,
@@ -92,7 +78,7 @@ impl Message {
     }
 
     /// Serialize message into a Vec<u8> to be sent
-    /// Message is serialized into: `[10 bytes header (version 2, id 4, payload size 4)][payload]`
+    /// Message is serialized into: [8 bytes header (version 2, id 2, payload size 4)][payload]
     pub fn serialize(&self) -> Result<Vec<u8>, MessageError> {
         // Serialize just the command to get its size
         let command_bytes = bincode::encode_to_vec(&self.command, bincode::config::standard())?;
@@ -118,29 +104,27 @@ impl Message {
         if let Err(e) = stream.write_all(&buf).await {
             return Err(e.into());
         }
-        // info!("TX: {:#?}", self.command);
         Ok(())
     }
 
     /// Read a message from a TcpStream (its owned read half)
     pub async fn from_stream(stream: &mut OwnedReadHalf) -> Result<Self, MessageError> {
-        let mut header_bytes = [0u8; 10];
-        if stream.read_exact(&mut header_bytes).await? != 10 {
+        let mut header_bytes = [0u8; 8];
+        if stream.read_exact(&mut header_bytes).await? != 8 {
             return Err(MessageError::HeaderLength);
         }
 
         let (version_bytes, id_and_size) = header_bytes.split_at(2);
-        let (id_bytes, size_bytes) = id_and_size.split_at(4);
+        let (id_bytes, size_bytes) = id_and_size.split_at(2);
 
         let version = u16::from_be_bytes(version_bytes.try_into()?);
-        let id = MessageId::from_be_bytes(id_bytes.try_into()?);
+        let id = u16::from_be_bytes(id_bytes.try_into()?);
         let size = u32::from_be_bytes(size_bytes.try_into()?);
 
         let mut command_bytes = vec![0u8; size as usize];
         stream.read_exact(&mut command_bytes).await?;
 
         let command = bincode::decode_from_slice(&command_bytes, bincode::config::standard())?.0;
-        // info!("RX: {:#?}", command);
         Ok(Message {
             command,
             id,

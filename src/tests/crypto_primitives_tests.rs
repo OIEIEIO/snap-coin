@@ -41,13 +41,31 @@ fn test_signing() -> Result<(), anyhow::Error> {
     let signature = Signature::new_signature(&mut private, data);
     let signature_bad = Signature::new_from_buf(&rand::rng().random());
 
-    assert!(signature.validate_with_private(&private, data)?, "A valid signature validation was rejected (private verification)");
-    assert!(signature.validate_with_public(&public, data)?, "A valid signature validation was rejected (public verification)");
+    assert!(
+        signature.validate_with_private(&private, data)?,
+        "A valid signature validation was rejected (private verification)"
+    );
+    assert!(
+        signature.validate_with_public(&public, data)?,
+        "A valid signature validation was rejected (public verification)"
+    );
 
-    assert!(!signature.validate_with_private(&private, data_bad)?, "A valid signature validation was accepted (private verification, bad data)");
-    assert!(!signature.validate_with_public(&public, data_bad)?, "A valid signature validation was accepted (public verification, bad data)");
+    assert!(
+        !signature.validate_with_private(&private, data_bad)?,
+        "A valid signature validation was accepted (private verification, bad data)"
+    );
+    assert!(
+        !signature.validate_with_public(&public, data_bad)?,
+        "A valid signature validation was accepted (public verification, bad data)"
+    );
 
-    assert!(!signature_bad.validate_with_private(&private, data)?, "A invalid signature validation was accepted (private verification)");
-    assert!(!signature_bad.validate_with_public(&public, data)?, "A invalid signature validation was accepted (public verification)");
+    assert!(
+        !signature_bad.validate_with_private(&private, data)?,
+        "A invalid signature validation was accepted (private verification)"
+    );
+    assert!(
+        !signature_bad.validate_with_public(&public, data)?,
+        "A invalid signature validation was accepted (public verification)"
+    );
     Ok(())
 }

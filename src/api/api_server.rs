@@ -11,9 +11,9 @@ use tokio::{
 use crate::{
     api::requests::{Request, Response},
     blockchain_data_provider::BlockchainDataProvider,
-    core::utils::slice_vec,
+    core::{blockchain::BlockchainError, transaction::TransactionError, utils::slice_vec},
     economics::get_block_reward,
-    node::node::Node,
+    node::node::{Node, SharedBlockchain},
 };
 
 pub const PAGE_SIZE: u32 = 200;
@@ -27,71 +27,52 @@ pub enum ApiError {
 /// Server for hosting a Snap Coin API
 pub struct Server {
     port: u32,
-    node: Arc<RwLock<Node>>,
+    blockchain: SharedBlockchain,
 }
 
 impl Server {
     /// Create a new server, do not listen for connections yet
-    pub fn new(port: u32, node: Arc<RwLock<Node>>) -> Self {
-        Server { port, node }
+    pub fn new(port: u32, blockchain: SharedBlockchain) -> Self {
+        Server { port, blockchain }
     }
 
     /// Handle a incoming connection
-    async fn connection(mut stream: TcpStream, node: Arc<RwLock<Node>>) {
+    async fn connection(&self, mut stream: TcpStream) {
         loop {
             if let Err(e) = async {
                 let request = Request::decode_from_stream(&mut stream).await?;
                 let response = match request {
                     Request::Height => Response::Height {
-                        height: node.read().await.blockchain.get_height() as u64,
+                        height: self.blockchain.block_store().get_height() as u64,
                     },
                     Request::Block { block_hash } => Response::Block {
-                        block: node.read().await.blockchain.get_block_by_hash(&block_hash),
+                        block: self.blockchain.block_store().get_block_by_hash(block_hash),
                     },
                     Request::BlockHash { height } => Response::BlockHash {
-                        hash: node
-                            .read()
-                            .await
+                        hash: self
                             .blockchain
-                            .get_block_hash_by_height(height as usize)
-                            .copied(),
+                            .block_store()
+                            .get_block_hash_by_height(height as usize),
                     },
-                    Request::Transaction { transaction_id } => {
-                        let node_guard = node.read().await;
-                        let mut found = None;
-
-                        for block_hash in node_guard.blockchain.get_all_blocks() {
-                            if let Some(block) = node_guard.blockchain.get_block_by_hash(block_hash)
-                            {
-                                for transaction in block.transactions {
-                                    if transaction.transaction_id.unwrap() == transaction_id {
-                                        found = Some(transaction);
-                                        break;
-                                    }
-                                }
-                            }
-                            if found.is_some() {
-                                break;
-                            }
-                        }
-
-                        Response::Transaction { transaction: found }
-                    }
+                    Request::Transaction { transaction_id } => Response::Transaction {
+                        transaction: self
+                            .blockchain
+                            .block_store()
+                            .get_transaction(transaction_id),
+                    },
                     Request::TransactionsOfAddress {
                         address,
                         page: requested_page,
                     } => {
-                        let node_guard = node.read().await;
                         let mut transactions = vec![];
 
-                        for block_hash in node_guard.blockchain.get_all_blocks() {
-                            if let Some(block) = node_guard.blockchain.get_block_by_hash(block_hash)
-                            {
-                                for transaction in block.transactions {
-                                    if transaction.outputs.iter().any(|i| i.receiver == address) {
-                                        transactions.push(transaction.transaction_id.unwrap());
-                                        break;
-                                    }
+                        for block in self.blockchain.block_store().iter_blocks() {
+                            let block = block?;
+                            for tx in block.transactions {
+                                if tx.contains_address(address) {
+                                    transactions.push(
+                                        tx.transaction_id.ok_or(TransactionError::MissingId)?,
+                                    );
                                 }
                             }
                         }
@@ -116,9 +97,7 @@ impl Server {
                         address,
                         page: requested_page,
                     } => {
-                        let available = node
-                            .read()
-                            .await
+                        let available = self
                             .blockchain
                             .get_available_transaction_outputs(address)
                             .await?;
@@ -134,7 +113,7 @@ impl Server {
                         };
                         Response::AvailableUTXOs {
                             available_inputs: page.to_vec(),
-                            next_page
+                            next_page,
                         }
                     }
                     Request::Balance { address } => Response::Balance {

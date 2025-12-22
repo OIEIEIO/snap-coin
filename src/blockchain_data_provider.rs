@@ -30,11 +30,11 @@ pub trait BlockchainDataProvider {
     
     /// Get block by hash
     /// Returns option
-    async fn get_block_by_hash(&self, hash: &Hash) -> Result<Option<Block>, BlockchainDataProviderError>;
+    async fn get_block_by_hash(&self, hash: Hash) -> Result<Option<Block>, BlockchainDataProviderError>;
 
     /// Get block height by its hash
     /// Returns option
-    async fn get_height_by_hash(&self, hash: &Hash) -> Result<Option<usize>, BlockchainDataProviderError>;
+    async fn get_height_by_hash(&self, hash: Hash) -> Result<Option<usize>, BlockchainDataProviderError>;
     
     /// Get blocks hash by its block height at which it was added
     /// Returns option

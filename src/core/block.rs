@@ -6,12 +6,12 @@ use thiserror::Error;
 
 use crate::{
     core::{difficulty::calculate_block_difficulty, transaction::Transaction},
-    crypto::Hash,
+    crypto::{Hash, address_inclusion_filter::AddressInclusionFilter, merkle_tree::MerkleTree},
 };
 
 pub const MAX_TRANSACTIONS: usize = 500;
 
-#[derive(Error, Debug, Serialize, Deserialize)]
+#[derive(Error, Debug, Serialize, Deserialize, Clone, Encode, Decode)]
 pub enum BlockError {
     #[error("Block is missing required metadata")]
     IncompleteBlock,
@@ -27,6 +27,12 @@ pub enum BlockError {
 
     #[error("Block pow difficulty is not up to target")]
     BlockPowDifficultyIncorrect,
+
+    #[error("Transaction is incomplete")]
+    IncompleteTransaction,
+
+    #[error("Merkle root tree is invalid")]
+    InvalidMerkleTreeRoot,
 }
 
 /// Stores transaction, difficulties, its hash, and its nonce
@@ -46,6 +52,8 @@ impl Block {
         block_pow_difficulty: &[u8; 32],
         tx_pow_difficulty: &[u8; 32],
         previous_block: Hash,
+        merkle_tree_root: &[u8; 32],
+        address_inclusion_filter: AddressInclusionFilter,
     ) -> Self {
         Block {
             transactions,
@@ -56,6 +64,8 @@ impl Block {
                 tx_pow_difficulty: *tx_pow_difficulty,
                 previous_block,
                 hash: None,
+                merkle_tree_root: *merkle_tree_root,
+                address_inclusion_filter,
             },
         }
     }
@@ -98,6 +108,7 @@ impl Block {
         self.check_completeness()?;
         self.validate_block_hash()?;
         self.validate_block_hash()?;
+        self.validate_merkle_tree()?;
         Ok(())
     }
 
@@ -149,6 +160,27 @@ impl Block {
         }
         Ok(())
     }
+
+    /// Check if merkle tree root is correctly calculated
+    pub fn validate_merkle_tree(&self) -> Result<(), BlockError> {
+        let mut ids = vec![];
+        for tx in &self.transactions {
+            tx.check_completeness()
+                .map_err(|_| BlockError::IncompleteTransaction)?;
+            ids.push(tx.transaction_id.unwrap());
+        }
+        let tree = MerkleTree::build(&ids);
+        if tree.root_hash() != self.meta.merkle_tree_root {
+            return Err(BlockError::InvalidMerkleTreeRoot);
+        }
+        Ok(())
+    }
+
+    pub fn address_count(&self) -> usize {
+        self.transactions
+            .iter()
+            .fold(0, |acc, tx| acc + tx.address_count())
+    }
 }
 
 // Represents all block data that is not essential to it's existence (however required)
@@ -158,4 +190,6 @@ pub struct BlockMetadata {
     pub tx_pow_difficulty: [u8; 32],
     pub previous_block: Hash,
     pub hash: Option<Hash>,
+    pub merkle_tree_root: [u8; 32],
+    pub address_inclusion_filter: AddressInclusionFilter,
 }

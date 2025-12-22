@@ -9,7 +9,7 @@ use crate::{
         blockchain::Blockchain,
         difficulty::{STARTING_BLOCK_DIFFICULTY, STARTING_TX_DIFFICULTY},
         transaction::TransactionOutput,
-    }, crypto::keys::Private
+    }, crypto::{address_inclusion_filter::AddressInclusionFilter, keys::Private}, node::mempool::MemPool
 };
 
 fn new_tmp_blockchain() -> Blockchain {
@@ -25,62 +25,68 @@ async fn test_blockchain_rollback() -> Result<(), anyhow::Error> {
     const TEST_HEIGHT: usize = 5;
 
     let miner = Private::new_random();
-    let mut bc = new_tmp_blockchain();
+    let bc = new_tmp_blockchain();
 
     let mut diff_log = HashMap::new();
     let mut utxos_log = HashMap::new();
     diff_log.insert(
-        bc.get_height(),
+        bc.block_store().get_height(),
         (
             bc.get_block_difficulty(),
             bc.get_transaction_difficulty(),
         ),
     );
-    utxos_log.insert(bc.get_height(), bc.get_utxos().utxos.clone());
+    utxos_log.insert(bc.block_store().get_height(), bc.get_utxos().get_all_utxos());
     for _ in 0..TEST_HEIGHT {
         let mut new_block = crate::build_block(&bc, &vec![], miner.to_public()).await?;
         #[allow(deprecated)]
         new_block.compute_pow()?;
 
+        // Kill 2 birds with one stone, check if filters are deterministic
+        assert_eq!(AddressInclusionFilter::create_filter(&new_block.transactions)?, AddressInclusionFilter::create_filter(&new_block.transactions)?, "");
+
         bc.add_block(new_block.clone())?;
         diff_log.insert(
-            bc.get_height(),
+            bc.block_store().get_height(),
             (
                 bc.get_block_difficulty(),
                 bc.get_transaction_difficulty(),
             ),
         );
-        let current_utxos = bc.get_utxos().utxos.clone();
-        utxos_log.insert(bc.get_height(), current_utxos.clone());
+        let current_utxos = bc.get_utxos().get_all_utxos();
+        utxos_log.insert(bc.block_store().get_height(), current_utxos.clone());
     }
 
     for _ in 0..TEST_HEIGHT {
+        println!("Height before: {}", bc.block_store().get_height());
         bc.pop_block()?;
+        println!("Height after: {}", bc.block_store().get_height());
         assert_eq!(
             bc.get_block_difficulty(),
-            diff_log.get(&bc.get_height()).unwrap().0,
+            diff_log.get(&bc.block_store().get_height()).unwrap().0,
             "Block difficulty did not roll back correctly"
         );
 
         assert_eq!(
             bc.get_transaction_difficulty(),
-            diff_log.get(&bc.get_height()).unwrap().1,
+            diff_log.get(&bc.block_store().get_height()).unwrap().1,
             "TX difficulty did not roll back correctly"
         );
         assert_eq!(
-            bc.get_utxos().utxos,
-            utxos_log.get(&bc.get_height()).unwrap().clone(),
-            "UTXOS did not roll back correctly (height {})", bc.get_height()
+            bc.get_utxos().get_all_utxos(),
+            utxos_log.get(&bc.block_store().get_height()).unwrap().clone(),
+            "UTXOS did not roll back correctly (height {})", bc.block_store().get_height()
         );
+        println!("Popped block");
     }
 
     assert_eq!(
-        bc.get_utxos().utxos.len(),
+        bc.get_utxos().get_all_utxos().len(),
         0,
         "UTXOS did not roll back correctly\n{:#?}",
-        bc.get_utxos().utxos
+        bc.get_utxos().get_all_utxos()
     );
-    assert_eq!(bc.get_height(), 0, "Height did not roll back correctly");
+    assert_eq!(bc.block_store().get_height(), 0, "Height did not roll back correctly");
     assert_eq!(
         bc.get_block_difficulty(),
         STARTING_BLOCK_DIFFICULTY,
@@ -121,7 +127,7 @@ async fn test_transaction_validation() -> Result<(), anyhow::Error> {
     let private2 = Private::new_random();
     let public2 = private2.to_public();
 
-    let mut bc = new_tmp_blockchain();
+    let bc = new_tmp_blockchain();
 
     // Create some genesis block and add it
     let mut block = build_block(&bc, &vec![], public).await?;
@@ -143,45 +149,40 @@ async fn test_transaction_validation() -> Result<(), anyhow::Error> {
     let res = bc.get_utxos().validate_transaction(&valid_tx, &BigUint::from_bytes_be(&bc.get_transaction_difficulty()));
     assert!(res.is_err(), "Tampered transaction passed (post re-hashing)");
 
-    // Create a new valid tx
-    // let mut valid_tx = build_transaction(&bc, private, vec![(public2, 10)])?;
-
-
-
     Ok(())
 }
 
-// #[tokio::test]
-// async fn test_mempool() -> Result<(), anyhow::Error> {
-//     let private = Private::new_random();
-//     let public = private.to_public();
+#[tokio::test]
+async fn test_mempool() -> Result<(), anyhow::Error> {
+    let private = Private::new_random();
+    let public = private.to_public();
 
-//     let mut bc = new_tmp_blockchain();
-//     let mempool = MemPool::new();
+    let bc = new_tmp_blockchain();
+    let mempool = MemPool::new();
 
-//     // Create some genesis block and add it
-//     let mut block = build_block(&bc, &vec![], public).await?;
-//     #[allow(deprecated)]
-//     block.compute_pow()?;
-//     bc.add_block(block)?;
+    // Create some genesis block and add it
+    let mut block = build_block(&bc, &vec![], public).await?;
+    #[allow(deprecated)]
+    block.compute_pow()?;
+    bc.add_block(block)?;
 
-//     let mut new_tx = build_transaction(&bc, private, vec![(public, 100)], vec![]).await?;
-//     new_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
+    let mut new_tx = build_transaction(&bc, private, vec![(public, 100)], vec![]).await?;
+    new_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
 
-//     assert!(mempool.validate_transaction(&new_tx).await, "Transaction invalidly flagged for double spending");
-//     mempool.add_transaction(new_tx).await;
-//     let mut new_tx = build_transaction(&bc, private, vec![(public, 100)], vec![]).await?;
-//     new_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
+    assert!(mempool.validate_transaction(&new_tx).await, "Transaction invalidly flagged for double spending");
+    mempool.add_transaction(new_tx).await;
+    let mut new_tx = build_transaction(&bc, private, vec![(public, 100)], vec![]).await?;
+    new_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
 
-//     assert!(!mempool.validate_transaction(&new_tx).await, "Transaction not flagged for double spending");
+    assert!(!mempool.validate_transaction(&new_tx).await, "Transaction not flagged for double spending");
     
-//     // Create an new block and add it (WITHOUT THE MEMPOOL TX!)
-//     let mut block = build_block(&bc, &mempool.get_mempool().await, public).await?;
-//     #[allow(deprecated)]
-//     block.compute_pow()?;
-//     bc.add_block(block)?;
+    // Create an new block and add it (WITHOUT THE MEMPOOL TX!)
+    let mut block = build_block(&bc, &mempool.get_mempool().await, public).await?;
+    #[allow(deprecated)]
+    block.compute_pow()?;
+    bc.add_block(block)?;
 
-//     assert!(!mempool.validate_transaction(&new_tx).await, "Transaction not flagged for double spending");
+    assert!(!mempool.validate_transaction(&new_tx).await, "Transaction not flagged for double spending");
 
-//     Ok(())
-// }
+    Ok(())
+}
