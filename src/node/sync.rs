@@ -5,7 +5,7 @@ use crate::{
     node::{
         message::{Command, Message},
         node::SharedBlockchain,
-        peer::{PeerHandle, request_from_peer},
+        peer::PeerHandle,
     },
 };
 
@@ -48,7 +48,7 @@ pub async fn sync_to_peer(
             let msg = Message::new(Command::GetBlock {
                 block_hash: local_hash,
             });
-            if let Ok(response) = request_from_peer(peer, msg).await {
+            if let Ok(response) = peer.request(msg).await {
                 if let Command::GetBlockResponse {
                     block: Some(peer_block),
                 } = response.command
@@ -72,7 +72,10 @@ pub async fn sync_to_peer(
         blockchain.pop_block()?;
     }
 
-    info!("Requesting block hashes from peer at height {}", fork_height);
+    info!(
+        "Requesting block hashes from peer at height {}",
+        fork_height
+    );
     // Download and apply missing blocks from peer
     let mut current_height = fork_height;
     while current_height < peer_height {
@@ -80,12 +83,12 @@ pub async fn sync_to_peer(
             start: current_height,
             end: current_height + 1,
         });
-        let response = request_from_peer(peer, msg).await?;
+        let response = peer.request(msg).await?;
         if let Command::GetBlockHashesResponse { block_hashes } = response.command {
             if let Some(hash) = block_hashes.first() {
                 let block_msg = Message::new(Command::GetBlock { block_hash: *hash });
                 if let Command::GetBlockResponse { block: Some(block) } =
-                    request_from_peer(peer, block_msg).await?.command
+                    peer.request(block_msg).await?.command
                 {
                     blockchain.add_block(block)?;
                     info!("Added block at height {}", current_height + 1);

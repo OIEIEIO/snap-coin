@@ -190,7 +190,7 @@ impl BlockchainDataProvider for Client {
 
     async fn get_block_by_hash(
         &self,
-        hash: Hash,
+        block_hash: Hash,
     ) -> Result<Option<Block>, BlockchainDataProviderError> {
         match self.fetch(Request::Block { block_hash }).await? {
             Response::Block { block } => Ok(block),

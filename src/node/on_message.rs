@@ -6,7 +6,7 @@ use crate::{
         message::{Command, Message},
         node::{SharedBlockchain, accept_block, accept_transaction},
         node_state::SharedNodeState,
-        peer::{PeerError, PeerHandle, kill_peer},
+        peer::{PeerError, PeerHandle},
         sync::sync_to_peer,
     },
 };
@@ -35,7 +35,7 @@ pub async fn on_message(
                     match res {
                         Ok(()) => {}
                         Err(e) => {
-                            if let Err(e) = kill_peer(&peer, e.to_string()).await {
+                            if let Err(e) = peer.kill(e.to_string()).await {
                                 error!("Failed to kill peer {}, error: {e}", peer.address);
                             }
                         }

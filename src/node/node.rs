@@ -2,10 +2,12 @@ use flexi_logger::{Duplicate, FileSpec, Logger};
 use futures::future::join_all;
 use log::{error, info};
 use num_bigint::BigUint;
-use tokio::net::TcpStream;
 use std::{
-    net::SocketAddr, path::PathBuf, sync::{Arc, Once}
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Once},
 };
+use tokio::net::TcpStream;
 
 use crate::{
     core::{
@@ -16,7 +18,7 @@ use crate::{
     node::{
         message::{Command, Message},
         node_state::{NodeState, SharedNodeState},
-        peer::{self, PeerError, PeerHandle, create_peer, kill_peer},
+        peer::{PeerError, PeerHandle, create_peer},
     },
 };
 
@@ -24,52 +26,54 @@ pub type SharedBlockchain = Arc<Blockchain>;
 
 static LOGGER_INIT: Once = Once::new();
 
-pub struct Node {
-    pub node_state: SharedNodeState,
-    pub blockchain: SharedBlockchain,
+pub fn create_node(node_path: &str) -> (SharedBlockchain, SharedNodeState) {
+    let node_path = PathBuf::from(node_path);
+
+    // Only initialize the logger once
+    LOGGER_INIT.call_once(|| {
+        let log_path = node_path.join("logs");
+        std::fs::create_dir_all(&log_path).expect("Failed to create log directory");
+
+        Logger::try_with_str("info")
+            .unwrap()
+            .log_to_file(FileSpec::default().directory(&log_path))
+            .duplicate_to_stderr(Duplicate::Info)
+            .start()
+            .ok(); // Ignore errors if logger is already set
+
+        info!("Logger initialized for node at {:?}", node_path);
+    });
+
+    let node_state = NodeState::new_empty();
+    node_state.mempool.start_expiry_watchdog();
+
+    let blockchain = Blockchain::new(
+        node_path
+            .join("blockchain")
+            .to_str()
+            .expect("Failed to create node path"),
+    );
+    (Arc::new(blockchain), node_state)
 }
 
-impl Node {
-    pub fn new(node_path: &str) -> Node {
-        let node_path = PathBuf::from(node_path);
+/// Connect to a peer
+pub async fn connect_peer(
+    address: SocketAddr,
+    blockchain: &SharedBlockchain,
+    node_state: &SharedNodeState,
+) -> Result<PeerHandle, PeerError> {
+    let stream = TcpStream::connect(address)
+        .await
+        .map_err(|e| PeerError::Io(format!("IO error: {e}")))?;
 
-        // Only initialize the logger once
-        LOGGER_INIT.call_once(|| {
-            let log_path = node_path.join("logs");
-            std::fs::create_dir_all(&log_path).expect("Failed to create log directory");
+    let handle = create_peer(stream, blockchain.clone(), node_state.clone(), false)?;
+    node_state
+        .connected_peers
+        .write()
+        .await
+        .insert(address, handle.clone());
 
-            Logger::try_with_str("info")
-                .unwrap()
-                .log_to_file(FileSpec::default().directory(&log_path))
-                .duplicate_to_stderr(Duplicate::Info)
-                .start()
-                .ok(); // Ignore errors if logger is already set
-
-            info!("Logger initialized for node at {:?}", node_path);
-        });
-
-        let node_state = NodeState::new_empty();
-        node_state.mempool.start_expiry_watchdog();
-
-        Node {
-            blockchain: Arc::new(Blockchain::new(
-                node_path
-                    .join("blockchain")
-                    .to_str()
-                    .expect("Failed to create node path"),
-            )),
-            node_state,
-        }
-    }
-
-    pub async fn connect_peer(&self, address: SocketAddr) -> Result<PeerHandle, PeerError> {
-        let stream = TcpStream::connect(address).await.map_err(|e| PeerError::Io(format!("IO error: {e}")))?;
-
-        let handle = create_peer(stream, self.blockchain.clone(), self.node_state.clone(), false)?;
-        self.node_state.connected_peers.write().await.insert(address, handle.clone());
-
-        Ok(handle)
-    }
+    Ok(handle)
 }
 
 /// Forward a message to all peers
@@ -86,8 +90,8 @@ pub async fn to_peers(message: Message, node_state: &SharedNodeState) {
     let futures = peers_snapshot.into_iter().map(|peer| {
         let message = message.clone();
         async move {
-            if let Err(err) = peer::request_from_peer(&peer, message).await {
-                if let Err(e) = kill_peer(&peer, err.to_string()).await {
+            if let Err(err) = peer.request(message).await {
+                if let Err(e) = peer.kill(err.to_string()).await {
                     error!("Failed to kill peer, error: {e}");
                 }
             }
@@ -115,6 +119,18 @@ pub async fn accept_block(
     // Validation
     blockchain::validate_block_timestamp(&new_block)?;
     blockchain.add_block(new_block.clone())?;
+
+    // Mempool, spend transactions
+    node_state
+        .mempool
+        .spend_transactions(
+            new_block
+                .transactions
+                .iter()
+                .map(|tx| tx.transaction_id.unwrap())
+                .collect(),
+        )
+        .await;
 
     info!("New block accepted: {}", block_hash.dump_base36());
     let node_state = node_state.clone();

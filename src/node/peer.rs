@@ -87,10 +87,51 @@ impl From<SyncError> for PeerError {
 /// Used to reference, request, and kill
 #[derive(Clone, Debug)]
 pub struct PeerHandle {
-    pub send: mpsc::Sender<Outgoing>,
     pub address: SocketAddr,
     pub is_client: bool,
+    send: mpsc::Sender<Outgoing>,
     kill: Arc<Mutex<Option<oneshot::Sender<KillSignal>>>>,
+}
+
+impl PeerHandle {
+    /// Send a request message, and expect a response message from this peer
+    pub async fn request(&self, request: Message) -> Result<Message, PeerError> {
+        let (callback_tx, callback_rx) = oneshot::channel::<Message>();
+
+        match timeout(
+            PEER_TIMEOUT,
+            self.send.send(Outgoing::Request(request, callback_tx)),
+        )
+        .await
+        {
+            Ok(res) => res.map_err(|e| PeerError::SendError(e.to_string()))?,
+            Err(_) => {
+                self.kill("Peer timed out".to_string()).await?;
+                return Err(PeerError::Timeout);
+            }
+        }
+
+        callback_rx
+            .await
+            .map_err(|e| PeerError::ReceiveError(e.to_string()))
+    }
+
+    /// Send a message without expecting a response
+    pub async fn send(&self, message: Message) -> Result<(), PeerError> {
+        self.send
+            .send(Outgoing::OneWay(message))
+            .await
+            .map_err(|e| PeerError::SendError(e.to_string()))
+    }
+
+    /// Send a kill signal to this peer
+    pub async fn kill(&self, message: String) -> Result<(), PeerError> {
+        if let Some(kill) = self.kill.lock().await.take() {
+            kill.send(message.clone())
+                .map_err(|_| PeerError::Killed(message))?;
+        }
+        Ok(())
+    }
 }
 
 /// Create a new peer, start internal tasks, and return a PeerHandle
@@ -154,48 +195,6 @@ pub fn create_peer(
     Ok(handle)
 }
 
-/// Send a request message, and expect a response message from this peer
-pub async fn request_from_peer(
-    peer: &PeerHandle,
-    request: Message,
-) -> Result<Message, PeerError> {
-    let (callback_tx, callback_rx) = oneshot::channel::<Message>();
-
-    match timeout(
-        PEER_TIMEOUT,
-        peer.send.send(Outgoing::Request(request, callback_tx)),
-    )
-    .await
-    {
-        Ok(res) => res.map_err(|e| PeerError::SendError(e.to_string()))?,
-        Err(_) => {
-            kill_peer(peer, "Peer timed out".to_string()).await?;
-            return Err(PeerError::Timeout);
-        }
-    }
-
-    callback_rx
-        .await
-        .map_err(|e| PeerError::ReceiveError(e.to_string()))
-}
-
-/// Send a message without expecting a response
-pub async fn send_to_peer(peer: &PeerHandle, message: Message) -> Result<(), PeerError> {
-    peer.send
-        .send(Outgoing::OneWay(message))
-        .await
-        .map_err(|e| PeerError::SendError(e.to_string()))
-}
-
-/// Send a kill signal to this peer
-pub async fn kill_peer(peer: &PeerHandle, message: String) -> Result<(), PeerError> {
-    if let Some(kill) = peer.kill.lock().await.take() {
-        kill.send(message.clone())
-            .map_err(|_| PeerError::Killed(message))?;
-    }
-    Ok(())
-}
-
 async fn reader_task(
     mut stream: OwnedReadHalf,
     pending: Pending,
@@ -212,7 +211,7 @@ async fn reader_task(
             let _ = requester.send(message);
         } else {
             let response = on_message(message, &my_handle, &blockchain, &node_state).await?;
-            send_to_peer(&my_handle, response).await?;
+            my_handle.send(response).await?;
         }
     }
 }
@@ -246,8 +245,7 @@ async fn pinger_task(
 ) -> Result<(), PeerError> {
     loop {
         sleep(PEER_PING_INTERVAL).await;
-        request_from_peer(
-            &my_handle,
+        my_handle.request(
             Message::new(Command::Ping {
                 height: blockchain.block_store().get_height(),
             }),
