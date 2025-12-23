@@ -1,22 +1,25 @@
-use bincode::{Decode, Encode, config};
+use std::{
+    collections::HashSet,
+    fs::{self, File},
+    path::Path,
+};
+
+use bincode::{Decode, Encode};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs::{self, File};
-use std::path::Path;
 use thiserror::Error;
 
-use crate::blockchain_data_provider::BlockchainDataProvider;
-use crate::core::block::{Block, BlockError, MAX_TRANSACTIONS};
-use crate::core::block_store::{BlockStore, BlockStoreError};
-use crate::core::difficulty::DifficultyManager;
-use crate::core::transaction::{Transaction, TransactionError, TransactionId, TransactionOutput};
-use crate::core::utxo::{UTXODiff, UTXOs};
-use crate::crypto::Hash;
-use crate::crypto::address_inclusion_filter::{
-    AddressInclusionFilter, AddressInclusionFilterError,
+use crate::{
+    core::{
+        block::{Block, BlockError, MAX_TRANSACTIONS},
+        block_store::{BlockStore, BlockStoreError},
+        difficulty::DifficultyManager,
+        transaction::{Transaction, TransactionError, TransactionId},
+        utxo::{UTXODiff, UTXOs},
+    },
+    crypto::address_inclusion_filter::{AddressInclusionFilter, AddressInclusionFilterError},
+    economics::{DEV_WALLET, EXPIRATION_TIME, calculate_dev_fee, get_block_reward},
 };
-use crate::economics::{DEV_WALLET, EXPIRATION_TIME, calculate_dev_fee, get_block_reward};
 
 #[derive(Error, Debug, Serialize, Deserialize, Clone, Encode, Decode)]
 pub enum BlockchainError {
@@ -145,8 +148,10 @@ impl Blockchain {
     fn load_blockchain_data(blockchain_path: &str) -> Result<BlockchainData, BlockchainError> {
         let mut file = File::open(format!("{}blockchain.dat", blockchain_path))
             .map_err(|e| BlockchainError::Io(e.to_string()))?;
-        Ok(bincode::decode_from_std_read(&mut file, config::standard())
-            .map_err(|e| BlockchainError::BincodeDecode(e.to_string()))?)
+        Ok(
+            bincode::decode_from_std_read(&mut file, bincode::config::standard())
+                .map_err(|e| BlockchainError::BincodeDecode(e.to_string()))?,
+        )
     }
 
     /// Save the blockchain data
@@ -160,7 +165,7 @@ impl Blockchain {
         file.sync_all()
             .map_err(|e| BlockchainError::Io(e.to_string()))?;
 
-        bincode::encode_into_std_write(blockchain_data, &mut file, config::standard())
+        bincode::encode_into_std_write(blockchain_data, &mut file, bincode::config::standard())
             .map_err(|e| BlockchainError::BincodeEncode(e.to_string()))?;
         Ok(())
     }
@@ -332,98 +337,6 @@ impl Blockchain {
 
     pub fn block_store(&self) -> &BlockStore {
         &self.block_store
-    }
-}
-
-#[async_trait::async_trait]
-impl BlockchainDataProvider for Blockchain {
-    async fn get_height(
-        &self,
-    ) -> Result<usize, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.block_store().get_height())
-    }
-
-    async fn get_reward(
-        &self,
-    ) -> Result<u64, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(get_block_reward(self.block_store().get_height()))
-    }
-
-    async fn get_block_by_height(
-        &self,
-        height: usize,
-    ) -> Result<Option<Block>, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.block_store().get_block_by_height(height))
-    }
-
-    async fn get_block_by_hash(
-        &self,
-        hash: Hash,
-    ) -> Result<Option<Block>, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.block_store().get_block_by_hash(hash))
-    }
-
-    async fn get_height_by_hash(
-        &self,
-        hash: Hash,
-    ) -> Result<Option<usize>, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.block_store().get_block_height_by_hash(hash))
-    }
-
-    async fn get_block_hash_by_height(
-        &self,
-        height: usize,
-    ) -> Result<Option<Hash>, crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.block_store().get_block_hash_by_height(height))
-    }
-
-    async fn get_transaction_difficulty(
-        &self,
-    ) -> Result<[u8; 32], crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.get_transaction_difficulty())
-    }
-
-    async fn get_block_difficulty(
-        &self,
-    ) -> Result<[u8; 32], crate::blockchain_data_provider::BlockchainDataProviderError> {
-        Ok(self.get_block_difficulty())
-    }
-
-    async fn get_available_transaction_outputs(
-        &self,
-        address: crate::crypto::keys::Public,
-    ) -> Result<
-        Vec<(TransactionId, TransactionOutput, usize)>,
-        crate::blockchain_data_provider::BlockchainDataProviderError,
-    > {
-        let mut available_outputs = vec![];
-
-        for item in self.utxos.db.iter() {
-            let (txid_bytes, value) = item.map_err(|e| BlockchainError::UTXOs(e.to_string()))?;
-            let txid_str = String::from_utf8(txid_bytes.to_vec())
-                .map_err(|e| BlockchainError::UTXOs(e.to_string()))?;
-            let txid = TransactionId::new_from_base36(&txid_str)
-                .ok_or(BlockchainError::UTXOs("Invalid TransactionId".to_string()))?;
-
-            // Decode the outputs
-            let outputs: Vec<Option<TransactionOutput>> =
-                bincode::decode_from_slice::<Vec<Option<TransactionOutput>>, _>(
-                    &value,
-                    bincode::config::standard(),
-                )
-                .map_err(|e| BlockchainError::UTXOs(e.to_string()))?
-                .0;
-
-            for (index, output_opt) in outputs.into_iter().enumerate() {
-                if let Some(output) = output_opt {
-                    if output.receiver == address {
-                        available_outputs.push((txid, output, index));
-                    }
-                }
-            }
-        }
-
-        Ok(available_outputs)
     }
 }
 

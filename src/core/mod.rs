@@ -21,3 +21,6 @@ pub mod difficulty;
 
 /// Access block data and metadata
 pub mod block_store;
+
+/// Access blockchain as a BlockchainDataProvider
+pub mod blockchain_ext;
