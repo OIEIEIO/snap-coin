@@ -41,9 +41,7 @@ pub fn create_node(node_path: &str, disable_stdout: bool) -> (SharedBlockchain, 
             logger = logger.duplicate_to_stderr(Duplicate::Info);
         }
 
-        logger
-            .start()
-            .ok(); // Ignore errors if logger is already set
+        logger.start().ok(); // Ignore errors if logger is already set
 
         info!("Logger initialized for node at {:?}", node_path);
     });

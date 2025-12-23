@@ -4,7 +4,7 @@ use std::{
 };
 
 use get_if_addrs::get_if_addrs;
-use log::error;
+use log::{error, info};
 use rand::seq::IteratorRandom;
 use tokio::{task::JoinHandle, time::sleep};
 
@@ -95,8 +95,13 @@ pub fn start_auto_peer(
                         if is_my_ip(&referral.ip()) {
                             continue;
                         }
+                        if node_state.connected_peers.read().await.contains_key(&referral) {
+                            continue;
+                        }
                         // try to connect to peer, if cant, no biggie
-                        let _ = connect_peer(referral, &blockchain, &node_state).await;
+                        if let Ok(connected_peer) = connect_peer(referral, &blockchain, &node_state).await {
+                            info!("Connected to new peer: {}, referred by: {}", connected_peer.address, peer.address);
+                        }
                     }
 
                     Ok::<(), PeerError>(())

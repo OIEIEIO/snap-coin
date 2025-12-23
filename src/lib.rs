@@ -8,9 +8,6 @@ use core::{
     transaction::{Transaction, TransactionInput, TransactionOutput},
 };
 
-/// Snap Coin API for accessing blockchain data from different programs
-// pub mod api;
-
 /// Provides a standardized way to access blockchain data from many sources
 pub mod blockchain_data_provider;
 
