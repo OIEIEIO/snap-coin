@@ -26,12 +26,16 @@ pub async fn on_message(
         }
         Command::Ping { height } => {
             let local = blockchain.block_store().get_height();
-            if local < height {
+            if local < height && !*node_state.is_syncing.read().await {
+                *node_state.is_syncing.write().await = true;
                 let peer = peer.clone();
                 let blockchain = blockchain.clone();
+
                 // We need to sync to longer chain
+                let node_state = node_state.clone();
                 tokio::spawn(async move {
                     let res = sync_to_peer(&peer, &blockchain, height).await;
+                    *node_state.is_syncing.write().await = false;
                     match res {
                         Ok(()) => {}
                         Err(e) => {

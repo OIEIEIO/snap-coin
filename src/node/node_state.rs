@@ -8,6 +8,7 @@ pub type SharedNodeState = Arc<NodeState>;
 pub struct NodeState {
     pub connected_peers: RwLock<HashMap<SocketAddr, PeerHandle>>,
     pub mempool: MemPool,
+    pub is_syncing: RwLock<bool>,
     last_seen_block_reader: watch::Receiver<Hash>,
     last_seen_block_writer: watch::Sender<Hash>,
     last_seen_transaction_reader: watch::Receiver<TransactionId>,
@@ -21,6 +22,7 @@ impl NodeState {
         Arc::new(NodeState {
             connected_peers: RwLock::new(HashMap::new()),
             mempool: MemPool::new(),
+            is_syncing: RwLock::new(false),
             last_seen_block_reader,
             last_seen_block_writer,
             last_seen_transaction_reader,
