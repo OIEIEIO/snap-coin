@@ -120,9 +120,9 @@ impl Transaction {
 
     /// Mine this transaction (aka. compute POW to allow it to be placed in the network)
     /// WARNING: You most likely want to supply this function with the LIVE transaction difficulty, which is adjusted for mempool difficulty pressure
-    /// WARNING: This is single threaded and needs to complete before a new block is mined on the network as otherwise tx_difficulty becomes invalid, and so the transaction too
-    /// Difficulty margin can be used to prevent the behavior mentioned above, however it will lead to a longer compute time. The bugger difficulty margin is, the more likely is the transaction to be valid next block.
-    /// Difficulty margin is a multiplier by how much harder does the actual difficulty need to be
+    /// WARNING: This is single threaded and needs to complete before a new block is mined on the network as otherwise tx_difficulty becomes invalid, and so the transaction too. This effect can also be amplified, by mempool pressure, which might tell nodes to reject this transaction if the live transaction difficulty criteria is not met.
+    /// Difficulty margin can be used to prevent the behavior mentioned above, however it will lead to a longer PoW compute time.
+    /// Difficulty margin is a percentage [0 - 1), where 0 means no change to target difficulty, and 1 means difficulty is 0 (incomputable, ever). It is recommended, that users (if displayed) should be presented with a 0 - 50% logarithmically scaled slider.
     pub fn compute_pow(
         &mut self,
         live_tx_difficulty: &[u8; 32],
