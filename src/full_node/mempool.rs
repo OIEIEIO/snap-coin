@@ -20,7 +20,7 @@ impl MemPool {
     }
 
     /// Starts a background task that removes expired transactions
-    pub fn start_expiry_watchdog(&self) {
+    pub fn start_expiry_watchdog(&self, mut on_expiry: impl FnMut(TransactionId) + Send + Sync + 'static) {
         let pending = self.pending.clone();
         tokio::spawn(async move {
             loop {
@@ -30,13 +30,16 @@ impl MemPool {
                 let mut write_guard = pending.write().await;
 
                 // Remove all expired transactions efficiently
-                let expired_keys: Vec<u64> = write_guard
-                    .range(..=now)
-                    .map(|(&k, _)| k)
-                    .collect();
+                let expired_keys: Vec<u64> = write_guard.range(..=now).map(|(&k, _)| k).collect();
 
                 for key in expired_keys {
-                    write_guard.remove(&key);
+                    if let Some(txs) = write_guard.remove(&key) {
+                        for tx in txs {
+                            if let Some(tx_id) = tx.transaction_id {
+                                on_expiry(tx_id);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -95,6 +98,10 @@ impl MemPool {
     }
 
     pub async fn mempool_size(&self) -> usize {
-        self.pending.read().await.values().fold(0, |acc, txs| acc + txs.len())
+        self.pending
+            .read()
+            .await
+            .values()
+            .fold(0, |acc, txs| acc + txs.len())
     }
 }

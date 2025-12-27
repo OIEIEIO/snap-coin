@@ -72,7 +72,14 @@ pub fn create_full_node(
     });
 
     let node_state = NodeState::new_empty();
-    node_state.mempool.start_expiry_watchdog();
+    let node_state_expiry = node_state.clone();
+    node_state
+        .mempool
+        .start_expiry_watchdog(move |transaction| {
+            let _ = node_state_expiry
+                .chain_events
+                .send(node_state::ChainEvent::TransactionExpiration { transaction });
+        });
 
     let blockchain = Blockchain::new(
         node_path

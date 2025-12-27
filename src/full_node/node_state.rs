@@ -78,4 +78,5 @@ impl NodeState {
 pub enum ChainEvent {
     Block { block: Block },
     Transaction { transaction: Transaction },
+    TransactionExpiration { transaction: TransactionId },
 }
