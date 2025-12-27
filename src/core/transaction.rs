@@ -132,8 +132,10 @@ impl Transaction {
 
         if let Some(margin) = difficulty_margin {
             if margin > 0.0 {
-                // Larger margin -> target becomes smaller → more difficult
-                target /= BigUint::from((margin * 1000.0) as u64);
+                let scale = 1.0 - margin; // smaller target -> harder
+                let scale_int = (scale * 1_000_000.0) as u64;
+                target *= BigUint::from(scale_int);
+                target /= BigUint::from(1_000_000u64);
             }
         }
         let mut rng = rand::rng();
