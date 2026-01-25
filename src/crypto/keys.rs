@@ -7,7 +7,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Store a public key, and use it to verify signatures
-#[derive(Encode, Decode, Clone, Copy, PartialEq)]
+#[derive(Encode, Decode, Clone, Copy, PartialEq, Hash, Eq)]
 pub struct Public {
     public: [u8; 32],
 }

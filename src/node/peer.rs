@@ -17,10 +17,9 @@ use tokio::{
 use thiserror::Error;
 
 use crate::{
-    core::blockchain::BlockchainError,
-    node::{
+    core::blockchain::BlockchainError, light_node::block_meta_store::BlockMetaStoreError, node::{
         message::{Command, Message, MessageId},peer_behavior::SharedPeerBehavior
-    },
+    }
 };
 
 /// Message expecting a response OR not
@@ -70,8 +69,14 @@ pub enum PeerError {
     #[error("Blockchain error: {0}")]
     Blockchain(#[from] BlockchainError),
 
+    #[error("Meta Store error: {0}")]
+    BlockMetaStore(#[from] BlockMetaStoreError),
+
     #[error("Sync error: {0}")]
     SyncError(String),
+
+    #[error("Incorrect response received")]
+    IncorrectResponse,
 }
 
 /// Used to reference, request, and kill

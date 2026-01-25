@@ -3,11 +3,16 @@ use std::sync::Arc;
 use log::{error, warn};
 
 use crate::{
-    crypto::merkle_tree::MerkleTreeProof, full_node::{SharedBlockchain, accept_block, accept_transaction, node_state::SharedNodeState, sync::sync_to_peer}, node::{
+    crypto::merkle_tree::MerkleTreeProof,
+    full_node::{
+        SharedBlockchain, accept_block, accept_transaction, node_state::SharedNodeState,
+        sync::sync_to_peer,
+    },
+    node::{
         message::{Command, Message},
         peer::{PeerError, PeerHandle},
         peer_behavior::{PeerBehavior, SharedPeerBehavior},
-    }
+    },
 };
 
 pub struct FullNodePeerBehavior {
@@ -38,7 +43,8 @@ impl PeerBehavior for FullNodePeerBehavior {
             }
             Command::Ping { height } => {
                 let local = blockchain.block_store().get_height();
-                if local < height && !*node_state.is_syncing.read().await {
+                if local + 1 < height && !*node_state.is_syncing.read().await {
+                    // Need two block offset
                     *node_state.is_syncing.write().await = true;
                     let peer = peer.clone();
                     let blockchain = blockchain.clone();
@@ -155,7 +161,7 @@ impl PeerBehavior for FullNodePeerBehavior {
                     "Got unhandled GetTransactionMerkleProofResponse".to_string(),
                 ));
             }
-            Command::GetBlockMeta { block_hash } => {
+            Command::GetBlockMetadata { block_hash } => {
                 let block_metadata =
                     (|| Some(blockchain.block_store().get_block_by_hash(block_hash)?.meta))();
                 message.make_response(Command::GetBlockMetadataResponse { block_metadata })

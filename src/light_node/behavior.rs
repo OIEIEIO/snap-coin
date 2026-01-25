@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use log::{error, warn};
+use log::warn;
 
 use crate::{
-    crypto::merkle_tree::MerkleTreeProof,
-    light_node::SharedLightNodeState,
+    light_node::{SharedLightNodeState, accept_block, accept_transaction},
     node::{
         message::{Command, Message},
         peer::{PeerError, PeerHandle},
@@ -18,15 +17,14 @@ pub struct LightNodePeerBehavior {
 
 impl LightNodePeerBehavior {
     pub fn new(light_node_state: SharedLightNodeState) -> SharedPeerBehavior {
-        Arc::new(Self {
-            light_node_state
-        })
+        Arc::new(Self { light_node_state })
     }
 }
 
 #[async_trait::async_trait]
 impl PeerBehavior for LightNodePeerBehavior {
-    async fn on_message(&self, message: Message, peer: &PeerHandle) -> Result<Message, PeerError> {
+    async fn on_message(&self, message: Message, _peer: &PeerHandle) -> Result<Message, PeerError> {
+        let light_node_state = &self.light_node_state;
         let response = match message.command {
             Command::Connect => message.make_response(Command::AcknowledgeConnection),
             Command::AcknowledgeConnection => {
@@ -34,27 +32,23 @@ impl PeerBehavior for LightNodePeerBehavior {
                     "Got unhandled AcknowledgeConnection".to_string(),
                 ));
             }
-            Command::Ping { height } => {
-                message.make_response(Command::Pong { height })
-            }
+            Command::Ping { height } => message.make_response(Command::Pong { height }),
             Command::Pong { .. } => {
                 return Err(PeerError::Unknown("Got unhandled Ping".to_string()));
             }
-            Command::GetPeers => {
-                message.make_response(Command::SendPeers { peers: vec![] })
-            }
+            Command::GetPeers => message.make_response(Command::SendPeers { peers: vec![] }),
             Command::SendPeers { .. } => {
                 return Err(PeerError::Unknown("Got unhandled SendPeers".to_string()));
             }
             Command::NewBlock { ref block } => {
-                if !*node_state.is_syncing.read().await {
-                    match accept_block(&blockchain, &node_state, block.clone()).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            warn!("Incoming block is invalid: {e}")
-                        }
+                // if !*light_node_state.is_syncing.read().await {
+                match accept_block(&light_node_state, block.clone()).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("Incoming block is invalid: {e}")
                     }
                 }
+                // }
 
                 message.make_response(Command::NewBlockResolved)
             }
@@ -64,7 +58,7 @@ impl PeerBehavior for LightNodePeerBehavior {
                 ));
             }
             Command::NewTransaction { ref transaction } => {
-                match accept_transaction(&blockchain, &node_state, transaction.clone()).await {
+                match accept_transaction(&light_node_state, transaction.clone()).await {
                     Ok(()) => {}
                     Err(e) => {
                         warn!("Incoming transaction is invalid: {e}")
@@ -77,8 +71,8 @@ impl PeerBehavior for LightNodePeerBehavior {
                     "Got unhandled NewTransactionAccepted".to_string(),
                 ));
             }
-            Command::GetBlock { block_hash } => message.make_response(Command::GetBlockResponse {
-                block: blockchain.block_store().get_block_by_hash(block_hash),
+            Command::GetBlock { .. } => message.make_response(Command::GetBlockResponse {
+                block: None, // We do not store blocks
             }),
             Command::GetBlockResponse { .. } => {
                 return Err(PeerError::Unknown(
@@ -88,7 +82,9 @@ impl PeerBehavior for LightNodePeerBehavior {
             Command::GetBlockHashes { start, end } => {
                 let mut hashes = vec![];
                 for height in start..end {
-                    if let Some(hash) = blockchain.block_store().get_block_hash_by_height(height) {
+                    if let Some(meta) = light_node_state.meta_store().get_meta_by_height(height)
+                        && let Some(hash) = meta.hash
+                    {
                         hashes.push(hash);
                     }
                 }
@@ -101,33 +97,16 @@ impl PeerBehavior for LightNodePeerBehavior {
                     "Got unhandled GetBlockResponse".to_string(),
                 ));
             }
-            Command::GetTransactionMerkleProof {
-                block,
-                transaction_id,
-            } => {
-                if let Some(block) = blockchain.block_store().get_block_by_hash(block) {
-                    let mut ids = vec![];
-                    for tx in block.transactions {
-                        ids.push(*tx.transaction_id.expect(
-                        "Blockchain contains transaction without TX ID. This should NEVER happen.",
-                    ));
-                    }
-                    message.make_response(Command::GetTransactionMerkleProofResponse {
-                        proof: MerkleTreeProof::create_proof(&ids, *transaction_id),
-                    })
-                } else {
-                    message
-                        .make_response(Command::GetTransactionMerkleProofResponse { proof: None })
-                }
-            }
+            Command::GetTransactionMerkleProof { .. } => {
+                message.make_response(Command::GetTransactionMerkleProofResponse { proof: None })
+            } // We don't give merkle proofs as we don't have all blocks
             Command::GetTransactionMerkleProofResponse { .. } => {
                 return Err(PeerError::Unknown(
                     "Got unhandled GetTransactionMerkleProofResponse".to_string(),
                 ));
             }
-            Command::GetBlockMeta { block_hash } => {
-                let block_metadata =
-                    (|| Some(blockchain.block_store().get_block_by_hash(block_hash)?.meta))();
+            Command::GetBlockMetadata { block_hash } => {
+                let block_metadata = light_node_state.meta_store().get_meta_by_hash(block_hash);
                 message.make_response(Command::GetBlockMetadataResponse { block_metadata })
             }
             Command::GetBlockMetadataResponse { .. } => {
@@ -141,11 +120,11 @@ impl PeerBehavior for LightNodePeerBehavior {
     }
 
     async fn get_height(&self) -> usize {
-        self.blockchain.block_store().get_height()
+        self.light_node_state.meta_store().get_height()
     }
 
     async fn on_kill(&self, peer: &PeerHandle) {
-        self.node_state
+        self.light_node_state
             .connected_peers
             .write()
             .await

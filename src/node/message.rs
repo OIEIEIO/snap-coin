@@ -45,7 +45,7 @@ pub enum Command {
     NewTransactionResolved,
 
     // Historical
-    GetBlockMeta {
+    GetBlockMetadata {
         block_hash: Hash,
     },
     GetBlockMetadataResponse {

@@ -4,7 +4,14 @@ pub mod light_node_state;
 /// Handles storing downloaded block meta
 pub mod block_meta_store;
 
-pub mod behavior;
+/// Handles storing blocks that the node might be interested in
+pub mod interesting_blocks;
+
+/// Starts initial block download
+pub mod initial_block_download;
+
+/// Handles what the light node does when it gets a p2p message
+mod behavior;
 
 use flexi_logger::{Duplicate, FileSpec, Logger};
 use log::info;
@@ -87,36 +94,65 @@ pub async fn connect_peer(
 pub async fn accept_block(
     light_node_state: &SharedLightNodeState,
     new_block: Block,
-) -> Result<(), BlockchainError> {
-    new_block.check_meta()?; // Make sure merkle tree, filter, and hash
+) -> Result<(), PeerError> {
+    // Make sure merkle tree, filter, and hash
+    if let Err(e) = new_block.check_meta() {
+        return Err(BlockchainError::from(e).into());
+    }
     let block_hash = new_block.meta.hash.unwrap(); // Unwrap is okay, we checked that block is complete
 
     // Validation
     blockchain::validate_block_timestamp(&new_block)?;
     for tx in &new_block.transactions {
-        blockchain::validate_transaction_timestamp(tx)?;
+        blockchain::validate_transaction_timestamp_in_block(tx, &new_block)?;
     }
 
-    if light_node_state.meta_store().get_last_block_hash() != block_hash {
-        return Err(BlockchainError::InvalidPreviousBlockHash);
+    if light_node_state.meta_store().get_last_block_hash() != new_block.meta.previous_block {
+        return Err(BlockchainError::InvalidPreviousBlockHash.into());
     }
 
     if new_block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
-        return Err(BlockchainError::TooManyTransactions);
+        return Err(BlockchainError::TooManyTransactions.into());
     }
 
     if BigUint::from_bytes_be(&*block_hash)
         > BigUint::from_bytes_be(&calculate_block_difficulty(
-            &light_node_state.difficulty_state.get_block_difficulty(),
+            &light_node_state
+                .meta_store()
+                .difficulty_state
+                .get_block_difficulty(),
             new_block.transactions.len(),
         ))
     {
-        return Err(TransactionError::InsufficientDifficulty(block_hash.dump_base36()).into());
+        return Err(
+            BlockchainError::from(TransactionError::InsufficientDifficulty(
+                block_hash.dump_base36(),
+            ))
+            .into(),
+        );
+    }
+
+    if let Err(e) = new_block.validate_difficulties(
+        &light_node_state
+            .meta_store()
+            .difficulty_state
+            .get_block_difficulty(),
+        &light_node_state
+            .meta_store()
+            .difficulty_state
+            .get_transaction_difficulty(),
+    ) {
+        return Err(BlockchainError::from(e).into());
     }
 
     light_node_state
+        .meta_store()
         .difficulty_state
         .update_difficulty(&new_block);
+
+    light_node_state
+        .meta_store()
+        .save_block_meta(new_block.meta.clone())?;
 
     info!("New block accepted: {}", block_hash.dump_base36());
 
@@ -134,10 +170,19 @@ pub async fn accept_transaction(
 ) -> Result<(), BlockchainError> {
     new_transaction.check_completeness()?;
     let transaction_id = new_transaction.transaction_id.unwrap(); // Unwrap is okay, we checked that tx is complete
-    if light_node_state.seen_transactions.read().await.contains(&transaction_id) {
-        return Ok(())
+    if light_node_state
+        .seen_transactions
+        .read()
+        .await
+        .contains(&transaction_id)
+    {
+        return Ok(());
     }
-    light_node_state.seen_transactions.write().await.insert(transaction_id);
+    light_node_state
+        .seen_transactions
+        .write()
+        .await
+        .insert(transaction_id);
 
     let transaction_hashing_buf = new_transaction
         .get_tx_hashing_buf()
@@ -154,6 +199,7 @@ pub async fn accept_transaction(
     if BigUint::from_bytes_be(&*transaction_id)
         > BigUint::from_bytes_be(
             &light_node_state
+                .meta_store()
                 .difficulty_state
                 .get_transaction_difficulty(),
         )
