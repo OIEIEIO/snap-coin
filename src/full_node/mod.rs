@@ -212,10 +212,13 @@ pub async fn accept_transaction(
         return Err(BlockchainError::LiveTransactionDifficulty);
     }
 
-    if node_state.last_seen_transaction() == transaction_id {
+    if node_state
+        .last_seen_transactions()
+        .contains(&transaction_id)
+    {
         return Ok(()); // We already processed this tx
     }
-    node_state.set_last_seen_transaction(transaction_id);
+    node_state.add_last_seen_transaction(transaction_id);
 
     // Validation
     blockchain::validate_transaction_timestamp(&new_transaction)?;
