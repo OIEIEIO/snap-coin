@@ -192,10 +192,9 @@ impl PeerBehavior for FullNodePeerBehavior {
         self.node_state.punish_ip(peer.address.ip()).await;
         if self.node_state.client_health_scores.read().await.get(&peer.address.ip()).unwrap_or(&0) > &BAN_SCORE_THRESHOLD {
             // Extra punishment
-            self.node_state.punish_ip(peer.address.ip()).await;
-            self.node_state.punish_ip(peer.address.ip()).await;
-            self.node_state.punish_ip(peer.address.ip()).await;
-            self.node_state.punish_ip(peer.address.ip()).await;
+            for _ in (0..10) { // 20 Min of punishment
+                self.node_state.punish_ip(peer.address.ip()).await;
+            }
         }
     }
 }
