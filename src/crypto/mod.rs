@@ -48,8 +48,7 @@ fn get_dataset() -> RandomXDataset {
         println!("Creating RandomX dataset...");
         let flags = RandomXFlag::FLAG_FULL_MEM | RandomXFlag::FLAG_JIT;
 
-        let cache =
-            RandomXCache::new(flags, RANDOMX_SEED).expect("Failed to create RandomX cache");
+        let cache = RandomXCache::new(flags, RANDOMX_SEED).expect("Failed to create RandomX cache");
 
         let dataset =
             RandomXDataset::new(flags, cache, 0).expect("Failed to create RandomX dataset");

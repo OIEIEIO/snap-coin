@@ -88,7 +88,7 @@ pub async fn sync_to_peer(
                 if let Command::GetBlockResponse { block: Some(block) } =
                     peer.request(block_msg).await?.command
                 {
-                    blockchain.add_block(block)?;
+                    blockchain.add_block(block, false)?;
                     info!("Added block at height {}", current_height + 1);
                 }
             }

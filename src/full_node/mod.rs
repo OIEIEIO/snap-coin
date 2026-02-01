@@ -160,7 +160,7 @@ pub async fn accept_block(
 
     // Validation
     blockchain::validate_block_timestamp(&new_block)?;
-    blockchain.add_block(new_block.clone())?;
+    blockchain.add_block(new_block.clone(), false)?;
 
     // Mempool, spend transactions
     node_state
@@ -225,6 +225,7 @@ pub async fn accept_transaction(
     blockchain.get_utxos().validate_transaction(
         &new_transaction,
         &BigUint::from_bytes_be(&blockchain.get_transaction_difficulty()),
+        false
     )?;
     if !node_state
         .mempool

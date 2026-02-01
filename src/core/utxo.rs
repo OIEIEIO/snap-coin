@@ -82,6 +82,7 @@ impl UTXOs {
         &self,
         transaction: &Transaction,
         tx_hashing_difficulty: &BigUint,
+        is_ibd: bool
     ) -> Result<(), TransactionError> {
         let tx_id = transaction
             .transaction_id
@@ -89,7 +90,7 @@ impl UTXOs {
         let input_signing_buf = transaction.get_input_signing_buf()?;
         let transaction_hashing_buf = transaction.get_tx_hashing_buf()?;
 
-        if !tx_id.compare_with_data(&transaction_hashing_buf) {
+        if !is_ibd && !tx_id.compare_with_data(&transaction_hashing_buf) {
             return Err(TransactionError::InvalidHash(tx_id.dump_base36()));
         }
 

@@ -166,7 +166,7 @@ impl Blockchain {
 
     /// Add a block to the blockchain, and then save the state of it
     /// Will return a blockchain error if the block or any of its included transactions are invalid
-    pub fn add_block(&self, new_block: Block) -> Result<(), BlockchainError> {
+    pub fn add_block(&self, new_block: Block, is_ibd: bool) -> Result<(), BlockchainError> {
         new_block.check_meta()?;
 
         new_block.validate_difficulties(
@@ -194,6 +194,7 @@ impl Blockchain {
                 self.utxos.validate_transaction(
                     transaction,
                     &BigUint::from_bytes_be(&self.get_transaction_difficulty()),
+                    is_ibd,
                 )?;
 
                 // Check for double spending

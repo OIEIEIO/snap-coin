@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use log::{error, info, warn};
+use log::{error, warn};
 
 use crate::{
     crypto::merkle_tree::MerkleTreeProof,
