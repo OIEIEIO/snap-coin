@@ -6,9 +6,7 @@ use tokio::{io::AsyncReadExt, net::TcpStream};
 
 use crate::{
     core::{
-        block::Block,
-        blockchain::BlockchainError,
-        transaction::{Transaction, TransactionId, TransactionOutput},
+        block::Block, block_store::TransactionAndInfo, blockchain::BlockchainError, transaction::{Transaction, TransactionId, TransactionOutput}
     },
     crypto::{Hash, keys::Public},
     full_node::node_state::ChainEvent,
@@ -40,6 +38,7 @@ pub enum Request {
     BlockHash { height: u64 },
     BlockHeight { hash: Hash },
     Transaction { transaction_id: TransactionId },
+    TransactionAndInfo { transaction_id: TransactionId },
     TransactionsOfAddress { address: Public, page: u32 },
     AvailableUTXOs { address: Public, page: u32 },
     Balance { address: Public },
@@ -114,6 +113,9 @@ pub enum Response {
     },
     Transaction {
         transaction: Option<Transaction>,
+    },
+    TransactionAndInfo {
+        transaction_and_info: Option<TransactionAndInfo>,
     },
     TransactionsOfAddress {
         transactions: Vec<TransactionId>,

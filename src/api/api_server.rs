@@ -66,6 +66,13 @@ impl Server {
                     Request::Transaction { transaction_id } => Response::Transaction {
                         transaction: blockchain.block_store().get_transaction(transaction_id),
                     },
+                    Request::TransactionAndInfo { transaction_id } => {
+                        Response::TransactionAndInfo {
+                            transaction_and_info: blockchain
+                                .block_store()
+                                .get_transaction_and_info(transaction_id),
+                        }
+                    }
                     Request::TransactionsOfAddress {
                         address,
                         page: requested_page,

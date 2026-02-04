@@ -7,6 +7,7 @@ use crate::{
     blockchain_data_provider::{BlockchainDataProvider, BlockchainDataProviderError},
     core::{
         block::Block,
+        block_store::TransactionAndInfo,
         blockchain::BlockchainError,
         transaction::{Transaction, TransactionId, TransactionOutput},
     },
@@ -118,6 +119,25 @@ impl Client {
             .await?
         {
             Response::Transaction { transaction } => Ok(transaction),
+            _ => Err(RequestResponseError::IncorrectResponse.into()),
+        }
+    }
+
+    /// Get transaction, inclusion height, and inclusion block hash, indexed by a transaction id.
+    /// Returns option
+    pub async fn get_transaction_and_info(
+        &self,
+        transaction_id: &TransactionId,
+    ) -> Result<Option<TransactionAndInfo>, BlockchainDataProviderError> {
+        match self
+            .fetch(Request::TransactionAndInfo {
+                transaction_id: *transaction_id,
+            })
+            .await?
+        {
+            Response::TransactionAndInfo {
+                transaction_and_info,
+            } => Ok(transaction_and_info),
             _ => Err(RequestResponseError::IncorrectResponse.into()),
         }
     }

@@ -11,7 +11,9 @@ use thiserror::Error;
 
 use crate::{
     core::{
-        block::{Block, BlockError}, transaction::{Transaction, TransactionId}, utxo::UTXODiff
+        block::{Block, BlockError},
+        transaction::{Transaction, TransactionId},
+        utxo::UTXODiff,
     },
     crypto::Hash,
     economics::GENESIS_PREVIOUS_BLOCK_HASH,
@@ -36,6 +38,13 @@ impl From<std::io::Error> for BlockStoreError {
     fn from(value: std::io::Error) -> Self {
         BlockStoreError::IO(value.to_string())
     }
+}
+
+#[derive(Encode, Decode, Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionAndInfo {
+    pub transaction: Transaction,
+    pub at_height: u64,
+    pub in_block: Hash,
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -267,7 +276,28 @@ impl BlockStore {
         None
     }
 
-    pub fn iter_blocks(&self) -> impl DoubleEndedIterator<Item = Result<Block, BlockStoreError>> + '_ {
+    pub fn get_transaction_and_info(&self, tx_id: TransactionId) -> Option<TransactionAndInfo> {
+        // Iterate from newest to oldest for faster access if likely recent
+        let height = self.get_height();
+        for h in (0..height).rev() {
+            if let Some(block) = self.get_block_by_height(h) {
+                for tx in block.transactions {
+                    if tx.transaction_id == Some(tx_id) {
+                        return Some(TransactionAndInfo {
+                            transaction: tx,
+                            at_height: h as u64,
+                            in_block: block.meta.hash.unwrap_or(Hash::new_from_buf([0u8; 32])),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn iter_blocks(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = Result<Block, BlockStoreError>> + '_ {
         let height = self.get_height();
         (0..height).map(move |h| {
             let path = self.block_path_by_height(h);

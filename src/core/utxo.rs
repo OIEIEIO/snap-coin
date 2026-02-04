@@ -82,7 +82,7 @@ impl UTXOs {
         &self,
         transaction: &Transaction,
         tx_hashing_difficulty: &BigUint,
-        is_ibd: bool
+        is_ibd: bool,
     ) -> Result<(), TransactionError> {
         let tx_id = transaction
             .transaction_id
@@ -264,8 +264,7 @@ impl UTXOs {
             .iter()
             .filter_map(|res| res.ok())
             .filter_map(|(k, v)| {
-                let txid =
-                    TransactionId::new_from_base36(&String::from_utf8(k.to_vec()).ok()?)?;
+                let txid = TransactionId::new_from_base36(&String::from_utf8(k.to_vec()).ok()?)?;
                 let outputs: Vec<Option<TransactionOutput>> =
                     bincode::decode_from_slice(&v, bincode::config::standard())
                         .ok()?
@@ -292,7 +291,12 @@ impl UTXOs {
                 if let Ok(txid_str) = String::from_utf8(txid_bytes.to_vec()) {
                     if let Some(txid) = TransactionId::new_from_base36(&txid_str) {
                         // Decode outputs
-                        if let Ok((outputs, _)) = bincode::decode_from_slice::<Vec<Option<TransactionOutput>>, _>(&value, bincode::config::standard()) {
+                        if let Ok((outputs, _)) =
+                            bincode::decode_from_slice::<Vec<Option<TransactionOutput>>, _>(
+                                &value,
+                                bincode::config::standard(),
+                            )
+                        {
                             for (index, output_opt) in outputs.into_iter().enumerate() {
                                 if let Some(output) = output_opt {
                                     all_utxos.push((txid, output, index));

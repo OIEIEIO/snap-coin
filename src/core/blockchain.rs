@@ -166,6 +166,7 @@ impl Blockchain {
 
     /// Add a block to the blockchain, and then save the state of it
     /// Will return a blockchain error if the block or any of its included transactions are invalid
+    /// WARNING: This can be randomly async unsafe, so if you have problems, wrap it in a spawn_blocking()
     pub fn add_block(&self, new_block: Block, is_ibd: bool) -> Result<(), BlockchainError> {
         new_block.check_meta()?;
 

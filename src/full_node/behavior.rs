@@ -5,7 +5,8 @@ use log::{error, warn};
 use crate::{
     crypto::merkle_tree::MerkleTreeProof,
     full_node::{
-        SharedBlockchain, accept_block, accept_transaction, node_state::SharedNodeState, p2p_server::BAN_SCORE_THRESHOLD, sync::sync_to_peer
+        SharedBlockchain, accept_block, accept_transaction, node_state::SharedNodeState,
+        p2p_server::BAN_SCORE_THRESHOLD, sync::sync_to_peer,
     },
     node::{
         message::{Command, Message},
@@ -190,9 +191,18 @@ impl PeerBehavior for FullNodePeerBehavior {
             .await
             .remove(&peer.address);
         self.node_state.punish_ip(peer.address.ip()).await;
-        if self.node_state.client_health_scores.read().await.get(&peer.address.ip()).unwrap_or(&0) > &BAN_SCORE_THRESHOLD {
+        if self
+            .node_state
+            .client_health_scores
+            .read()
+            .await
+            .get(&peer.address.ip())
+            .unwrap_or(&0)
+            > &BAN_SCORE_THRESHOLD
+        {
             // Extra punishment
-            for _ in (0..10) { // 20 Min of punishment
+            for _ in 0..10 {
+                // 20 Min of punishment
                 self.node_state.punish_ip(peer.address.ip()).await;
             }
         }

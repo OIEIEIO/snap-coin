@@ -8,7 +8,13 @@ use log::{error, info};
 use rand::seq::IteratorRandom;
 use tokio::{task::JoinHandle, time::sleep};
 
-use crate::{full_node::{SharedBlockchain, connect_peer, node_state::SharedNodeState}, node::{message::{Command, Message}, peer::{PeerError, PeerHandle}}};
+use crate::{
+    full_node::{SharedBlockchain, connect_peer, node_state::SharedNodeState},
+    node::{
+        message::{Command, Message},
+        peer::{PeerError, PeerHandle},
+    },
+};
 
 /// Amount of peers, that the node is trying to achieve stable connections with
 pub const TARGET_PEERS: usize = 12;
@@ -90,12 +96,22 @@ pub fn start_auto_peer(
                         if is_my_ip(&referral.ip()) {
                             continue;
                         }
-                        if node_state.connected_peers.read().await.contains_key(&referral) {
+                        if node_state
+                            .connected_peers
+                            .read()
+                            .await
+                            .contains_key(&referral)
+                        {
                             continue;
                         }
                         // try to connect to peer, if cant, no biggie
-                        if let Ok(connected_peer) = connect_peer(referral, &blockchain, &node_state).await {
-                            info!("Connected to new peer: {}, referred by: {}", connected_peer.address, peer.address);
+                        if let Ok(connected_peer) =
+                            connect_peer(referral, &blockchain, &node_state).await
+                        {
+                            info!(
+                                "Connected to new peer: {}, referred by: {}",
+                                connected_peer.address, peer.address
+                            );
                         }
                     }
 
