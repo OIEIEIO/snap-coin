@@ -60,9 +60,7 @@ impl UTXOs {
         self.db
             .insert(key, buffer)
             .map_err(|e| TransactionError::Other(e.to_string()))?;
-        self.db
-            .flush()
-            .map_err(|e| TransactionError::Other(e.to_string()))?;
+        
         Ok(())
     }
 
@@ -71,9 +69,7 @@ impl UTXOs {
         self.db
             .remove(txid.dump_base36())
             .map_err(|e| TransactionError::Other(e.to_string()))?;
-        self.db
-            .flush()
-            .map_err(|e| TransactionError::Other(e.to_string()))?;
+        
         Ok(())
     }
 
@@ -200,6 +196,10 @@ impl UTXOs {
         for (index, output) in transaction.outputs.iter().enumerate() {
             created_utxos.push((tx_id, index, *output));
         }
+        
+        self.db
+            .flush()
+            .map_err(|e| TransactionError::Other(e.to_string()))?;
 
         Ok(UTXODiff {
             spent: spent_utxos,
