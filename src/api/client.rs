@@ -1,6 +1,10 @@
 use std::net::SocketAddr;
 
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpStream,
+    sync::{Mutex, broadcast},
+};
 
 use crate::{
     api::requests::{Request, RequestResponseError, Response},
@@ -191,24 +195,43 @@ impl Client {
     pub async fn convert_to_event_listener(
         self,
         mut on_event: impl FnMut(ChainEvent),
+        mut shutdown_rx: Option<broadcast::Receiver<()>>,
     ) -> Result<(), BlockchainDataProviderError> {
         let mut stream = self.stream.lock().await;
+
         stream
             .write_all(&Request::SubscribeToChainEvents.encode()?)
             .await
             .map_err(|_| RequestResponseError::Stream)?;
 
         loop {
-            let message = Response::decode_from_stream(&mut stream).await?;
-
-            match message {
-                Response::ChainEvent { event } => {
-                    on_event(event);
+            tokio::select! {
+                // Shutdown path
+                _ = async {
+                    if let Some(rx) = &mut shutdown_rx {
+                        let _ = rx.recv().await;
+                    } else {
+                        futures::future::pending::<()>().await;
+                    }
+                } => {
+                    // graceful exit
+                    return Ok(());
                 }
-                _ => {
-                    return Err(BlockchainDataProviderError::RequestResponseError(
-                        RequestResponseError::IncorrectResponse,
-                    ));
+
+                // Event path
+                message = Response::decode_from_stream(&mut stream) => {
+                    let message = message?;
+
+                    match message {
+                        Response::ChainEvent { event } => {
+                            on_event(event);
+                        }
+                        _ => {
+                            return Err(BlockchainDataProviderError::RequestResponseError(
+                                RequestResponseError::IncorrectResponse,
+                            ));
+                        }
+                    }
                 }
             }
         }
