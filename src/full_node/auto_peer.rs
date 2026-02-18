@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Amount of peers, that the node is trying to achieve stable connections with
-pub const TARGET_PEERS: usize = 12;
+pub const TARGET_PEERS: usize = 24;
 pub const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Daemon reload cycle time

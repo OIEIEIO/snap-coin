@@ -103,7 +103,7 @@ pub async fn sync_to_peer(
                 if let Command::GetBlockResponse { block: Some(block) } =
                     peer.request(block_msg).await?.command
                 {
-                    blockchain.add_block(block.clone(), false)?;
+                    blockchain.add_block(block.clone(), false, false)?;
                     node_state.set_last_seen_block(block.meta.hash.unwrap());
                     // Broadcast new block
                     let _ = node_state

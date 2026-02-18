@@ -1,36 +1,32 @@
-use std::collections::BTreeMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
+use futures::future::join_all;
 use log::info;
-use tokio::sync::mpsc;
-use tokio::task::spawn_blocking;
+use tokio::sync::{RwLock, mpsc};
+use tokio::time::Instant;
 
+use crate::core::utils::slice_vec;
 use crate::full_node::node_state::SharedNodeState;
 use crate::{
     core::block::Block,
     full_node::SharedBlockchain,
-    node::{
-        message::{Command, Message},
-        peer::PeerHandle,
-    },
+    node::message::{Command, Message},
 };
 
-const IBD_SAFE_SKIP_TX_HASHING: usize = 500;
-const BLOCKS_PER_REQUEST: usize = 16; // Like Bitcoin's inv messages
-const MAX_BLOCKS_IN_FLIGHT: usize = 1024; // Maximum blocks downloading at once
-const STATUS_EVERY: usize = 500;
+pub const IBD_SAFE_SKIP_HASHING: usize = 500;
+const DOWNLOAD_BATCH: usize = 2000; // How many blocks to download for all peers
+const MAX_PENDING: usize = 1024;
 
 pub async fn ibd_blockchain(
     node_state: SharedNodeState,
     blockchain: SharedBlockchain,
     full_ibd: bool,
+    hashing_threads: usize,
 ) -> Result<(), anyhow::Error> {
-    info!("Starting initial block download");
+    info!("[IBD] Starting initial block download");
 
     let local_height = blockchain.block_store().get_height();
 
@@ -56,228 +52,257 @@ pub async fn ibd_blockchain(
     };
 
     if remote_height <= local_height {
-        info!("[SYNC] Already synced");
+        info!("[IBD] Already synced");
         return Ok(());
     }
 
     // Fetch block hashes
-    let hashes = match initial_peer
-        .request(Message::new(Command::GetBlockHashes {
-            start: local_height,
-            end: remote_height,
-        }))
-        .await?
-        .command
-    {
-        Command::GetBlockHashesResponse { block_hashes } => block_hashes,
-        _ => {
-            return Err(anyhow!(
-                "Could not fetch peer block hashes to sync blockchain"
-            ));
-        }
-    };
-
-    info!("[SYNC] Fetched {} block hashes", hashes.len());
-
+    let hashes = Arc::new(
+        match initial_peer
+            .request(Message::new(Command::GetBlockHashes {
+                start: local_height,
+                end: remote_height,
+            }))
+            .await?
+            .command
+        {
+            Command::GetBlockHashesResponse { block_hashes } => block_hashes,
+            _ => {
+                return Err(anyhow!(
+                    "Could not fetch peer block hashes to sync blockchain"
+                ));
+            }
+        },
+    );
     let total = hashes.len();
-    let next_request_index = Arc::new(AtomicUsize::new(0));
-    let blocks_in_flight = Arc::new(AtomicUsize::new(0));
-    let blocks_applied = Arc::new(AtomicUsize::new(0));
-    let start_time = Instant::now();
 
-    // Channel for downloaded blocks (index, block)
-    let (block_tx, mut block_rx) = mpsc::channel::<(usize, Block)>(MAX_BLOCKS_IN_FLIGHT);
+    info!(
+        "[IBD] Fetched {total} block hashes. First hash: {}",
+        hashes[0].dump_base36()
+    );
 
-    // Download loop - continuously feed blocks to peers
+    // let total = hashes.len();
+    let mut current_processing_height = local_height;
+    let (downloaded_block_tx, mut downloaded_block_rx) = mpsc::channel::<Block>(MAX_PENDING);
+
+    let download_stats: Arc<RwLock<(Option<(SocketAddr, f64)>, Option<(SocketAddr, f64)>)>> =
+        Arc::new(RwLock::new((None, None)));
+
     let downloader = {
+        let mut downloader_height = 0; // Hash fetch local index
         let node_state = node_state.clone();
-        let hashes = hashes.clone();
-        let next_request_index = next_request_index.clone();
-        let blocks_in_flight = blocks_in_flight.clone();
-
+        let download_stats = download_stats.clone();
         tokio::spawn(async move {
+            let mut peer_download_speeds = HashMap::<SocketAddr, f64>::new();
             loop {
-                // Check if we need more blocks in flight
-                let in_flight = blocks_in_flight.load(Ordering::SeqCst);
-                if in_flight >= MAX_BLOCKS_IN_FLIGHT {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
-                }
-
-                // Get next block index to request
-                let start_index = next_request_index.load(Ordering::SeqCst);
-                if start_index >= total {
-                    break; // All blocks requested
-                }
-
-                // Calculate how many blocks to request
-                let available_slots = MAX_BLOCKS_IN_FLIGHT - in_flight;
-                let blocks_to_request = available_slots
-                    .min(BLOCKS_PER_REQUEST)
-                    .min(total - start_index);
-
-                // Reserve these blocks
-                let end_index = start_index + blocks_to_request;
-                next_request_index.store(end_index, Ordering::SeqCst);
-                blocks_in_flight.fetch_add(blocks_to_request, Ordering::SeqCst);
-
-                // Get available peers
-                let peers: Vec<PeerHandle> = {
-                    let peers = node_state.connected_peers.read().await;
-                    if peers.is_empty() {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                    peers.values().cloned().collect()
+                let mut download_tasks = vec![];
+                let average_peer_speed = if peer_download_speeds.is_empty() {
+                    1.0
+                } else {
+                    peer_download_speeds.values().sum::<f64>() / peer_download_speeds.len() as f64
                 };
 
-                // Distribute blocks across peers round-robin
-                for (i, index) in (start_index..end_index).enumerate() {
-                    let peer = peers[i % peers.len()].clone();
-                    let hash = hashes[index];
-                    let block_tx = block_tx.clone();
-                    let blocks_in_flight = blocks_in_flight.clone();
+                let peer_batch = DOWNLOAD_BATCH / node_state.connected_peers.read().await.len();
+                for (ip, peer) in node_state.connected_peers.read().await.iter() {
+                    let peer_speed = peer_download_speeds.get(ip).unwrap_or(&average_peer_speed);
+                    let peer_contribution = peer_speed / average_peer_speed;
+                    let download_end = (downloader_height
+                        + (peer_batch as f64 * peer_contribution) as usize)
+                        .min(total);
+                    let batch = slice_vec(&hashes, downloader_height, download_end).to_vec();
 
-                    tokio::spawn(async move {
-                        let result = async {
-                            let resp = peer
-                                .request(Message::new(Command::GetBlock { block_hash: hash }))
-                                .await?;
+                    let peer = peer.clone();
+                    let ip = ip.clone();
 
-                            match resp.command {
-                                Command::GetBlockResponse { block } => block.ok_or_else(|| {
-                                    anyhow!("Peer returned empty block {}", hash.dump_base36())
-                                }),
-                                _ => Err(anyhow!(
-                                    "Unexpected response for block {}",
-                                    hash.dump_base36()
-                                )),
+                    download_tasks.push(tokio::spawn(async move {
+                        let mut speeds = vec![];
+                        let mut blocks = vec![];
+
+                        // Prepare a vector of futures
+                        let futures: Vec<_> = batch
+                            .iter()
+                            .map(|hash| {
+                                let peer = peer.clone();
+                                async move {
+                                    let start = Instant::now(); // measure per-block download time
+                                    match peer
+                                        .request(Message::new(Command::GetBlock {
+                                            block_hash: *hash,
+                                        }))
+                                        .await?
+                                        .command
+                                    {
+                                        Command::GetBlockResponse { block } => {
+                                            let elapsed_secs = start.elapsed().as_secs_f64();
+                                            let block_size = bincode::encode_to_vec(
+                                                &block,
+                                                bincode::config::standard(),
+                                            )?
+                                            .len();
+                                            let speed = block_size as f64 / elapsed_secs; // bytes per second
+                                            Ok((block, speed))
+                                        }
+                                        _ => Err(anyhow!("Peer responded with incorrect response")),
+                                    }
+                                }
+                            })
+                            .collect();
+
+                        // Run all futures concurrently and wait for them
+                        let results = join_all(futures).await;
+
+                        for result in results {
+                            if let Ok((Some(block), speed)) = result {
+                                blocks.push(block);
+                                speeds.push(speed);
                             }
                         }
-                        .await;
 
-                        match result {
-                            Ok(block) => {
-                                let _ = block_tx.send((index, block)).await;
-                            }
-                            Err(e) => {
-                                info!("[IBD] Failed to download block {}: {}", index, e);
-                                // Block will be re-requested when we detect it's missing
-                            }
-                        }
+                        Ok::<(Vec<f64>, SocketAddr, Vec<Block>), anyhow::Error>((
+                            speeds, ip, blocks,
+                        ))
+                    }));
 
-                        blocks_in_flight.fetch_sub(1, Ordering::SeqCst);
-                    });
+                    downloader_height = download_end;
                 }
 
-                // Small delay to prevent tight loop
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-
-            drop(block_tx);
-        })
-    };
-
-    // Apply loop - apply blocks in order
-    let applier = {
-        let blockchain = blockchain.clone();
-        let blocks_applied = blocks_applied.clone();
-        let blocks_in_flight = blocks_in_flight.clone();
-
-        tokio::spawn(async move {
-            let mut next_to_apply = 0;
-            let mut buffer: BTreeMap<usize, Block> = BTreeMap::new();
-            let mut apply_times = Vec::new();
-            let mut last_status_time = Instant::now();
-
-            while next_to_apply < total {
-                // Receive blocks
-                if let Some((index, block)) = block_rx.recv().await {
-                    buffer.insert(index, block);
-
-                    // Apply all consecutive blocks
-                    while let Some(block) = buffer.remove(&next_to_apply) {
-                        let apply_start = Instant::now();
-
-                        let blockchain_clone = blockchain.clone();
-                        let blocks_remaining = total - next_to_apply;
-                        spawn_blocking(move || {
-                            blockchain_clone.add_block(
-                                block,
-                                blocks_remaining > IBD_SAFE_SKIP_TX_HASHING && !full_ibd,
-                            )
-                        })
-                        .await
-                        .map_err(|e| anyhow!("Blocking task error: {}", e))??;
-
-                        let apply_time = apply_start.elapsed();
-                        apply_times.push(apply_time.as_millis() as f64);
-                        if apply_times.len() > 100 {
-                            apply_times.remove(0);
-                        }
-
-                        let finished = blocks_applied.fetch_add(1, Ordering::SeqCst) + 1;
-                        next_to_apply += 1;
-
-                        // Status every 500 blocks or every 5 seconds
-                        let should_print = finished % STATUS_EVERY == 0
-                            || finished == total
-                            || last_status_time.elapsed() > Duration::from_secs(5);
-
-                        if should_print {
-                            last_status_time = Instant::now();
-
-                            let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
-                            let speed = finished as f64 / elapsed;
-                            let remaining = total - finished;
-                            let eta_secs = (remaining as f64 / speed).max(0.0);
-                            let pct = (finished as f64 / total as f64) * 100.0;
-
-                            let avg_apply_ms = if !apply_times.is_empty() {
-                                apply_times.iter().sum::<f64>() / apply_times.len() as f64
-                            } else {
-                                0.0
-                            };
-
-                            let in_flight = blocks_in_flight.load(Ordering::SeqCst);
-
-                            info!(
-                                "[IBD] {:.1}% ({}/{}) | {:.1} blk/s | ETA: {}s | in-flight: {} | buffered: {} | avg-apply: {:.0}ms",
-                                pct,
-                                finished,
-                                total,
-                                speed,
-                                eta_secs as u64,
-                                in_flight,
-                                buffer.len(),
-                                avg_apply_ms
-                            );
-                        }
+                let mut fastest: Option<(SocketAddr, f64)> = None;
+                let mut slowest: Option<(SocketAddr, f64)> = None;
+                for task in download_tasks {
+                    let (speeds, ip, blocks) = task.await??; // Check if peer downloaded all blocks correctly
+                    for block in blocks {
+                        // Send all our blocks
+                        downloaded_block_tx.send(block).await?;
                     }
-                } else {
+                    if speeds.is_empty() {
+                        continue;
+                    }
+                    let speed = speeds.iter().sum::<f64>() / speeds.len() as f64 * 1000.0;
+                    peer_download_speeds.insert(ip, speed);
+
+                    let dummy_addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+                    if fastest.unwrap_or((dummy_addr, 0.0)).1 < speed {
+                        fastest = Some((ip, speed));
+                    }
+                    if slowest.unwrap_or((dummy_addr, f64::INFINITY)).1 > speed {
+                        slowest = Some((ip, speed));
+                    }
+                }
+                *download_stats.write().await = (fastest, slowest);
+                if downloader_height == total {
+                    info!("[IBD] Downloads finished");
                     break;
                 }
-            }
-
-            if next_to_apply < total {
-                return Err(anyhow!(
-                    "IBD incomplete: applied {}/{} blocks",
-                    next_to_apply,
-                    total
-                ));
             }
 
             Ok::<(), anyhow::Error>(())
         })
     };
 
-    // Wait for both loops
-    let (download_result, apply_result) = tokio::join!(downloader, applier);
+    // Validate hashes concurrently
+    let (validate_hash_tx, validate_hash_rx) = mpsc::channel::<Block>(hashing_threads);
+    let validate_hash_rx = Arc::new(Mutex::new(validate_hash_rx)); // Arc Mutex lock so that when a thread is available to take a new hash it will lock onto it and get the next job
 
-    download_result.map_err(|e| anyhow!("Downloader task panicked: {}", e))?;
-    apply_result.map_err(|e| anyhow!("Applier task panicked: {}", e))??;
+    let hashers = tokio::spawn(async move {
+        let mut handles = vec![];
 
-    info!("[SYNC] Blockchain synced successfully");
+        for _ in 0..hashing_threads {
+            let validate_hash_rx = validate_hash_rx.clone();
+
+            handles.push(tokio::task::spawn_blocking(move || {
+                loop {
+                    let block = {
+                        let mut rx = validate_hash_rx.lock().unwrap();
+                        rx.blocking_recv()
+                    };
+
+                    match block {
+                        Some(block) => block.validate_block_hash()?,
+                        None => break,
+                    }
+                }
+
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+
+        for handle in handles {
+            handle.await??;
+        }
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    // Applier loop
+    let applier = tokio::spawn(async move {
+        let start_time = Instant::now(); // Track total elapsed time
+        let total_blocks_to_sync = (remote_height - local_height) as f64; // Only the remaining blocks
+
+        loop {
+            if let Some(block) = downloaded_block_rx.recv().await {
+                let speed_up = !full_ibd
+                    && (remote_height - current_processing_height) > IBD_SAFE_SKIP_HASHING;
+                blockchain.add_block(block.clone(), speed_up, speed_up)?;
+                if speed_up { // We must validate hash, multi thread
+                    validate_hash_tx.send(block).await?
+                };
+
+                current_processing_height += 1;
+
+                // Calculate percent completed relative to remaining blocks
+                let processed_blocks = (current_processing_height - local_height) as f64;
+                let percent = processed_blocks / total_blocks_to_sync * 100.0;
+
+                // Calculate ETA
+                let elapsed_secs = start_time.elapsed().as_secs_f64();
+                let remaining_blocks = total_blocks_to_sync - processed_blocks;
+                let blocks_per_sec = if elapsed_secs > 0.0 {
+                    processed_blocks / elapsed_secs
+                } else {
+                    0.0
+                };
+                let eta_secs = if blocks_per_sec > 0.0 {
+                    remaining_blocks / blocks_per_sec
+                } else {
+                    f64::INFINITY
+                };
+
+                if current_processing_height % 5000 == 0
+                    || current_processing_height == remote_height
+                {
+                    let fastest = if let Some((ip, speed)) = download_stats.read().await.0 {
+                        format!("[{ip}, {:.4} kB/s]", speed / 1000.0)
+                    } else {
+                        "[no info]".to_string()
+                    };
+                    let slowest = if let Some((ip, speed)) = download_stats.read().await.1 {
+                        format!("[{ip}, {:.4} kB/s]", speed / 1000.0)
+                    } else {
+                        "[no info]".to_string()
+                    };
+
+                    info!(
+                        "[IBD] Progress: {current_processing_height} / {remote_height} ({percent:.2}%) \
+                        Speed: {:.2} blocks/s ETA: {:.2} seconds Fastest peer: {fastest} Slowest peer: {slowest}",
+                        blocks_per_sec, eta_secs
+                    );
+                }
+
+                if current_processing_height == remote_height {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    hashers.await??;
+    applier.await??;
+    downloader.await??;
 
     Ok(())
 }

@@ -32,6 +32,7 @@ pub struct NodeState {
     pub chain_events: broadcast::Sender<ChainEvent>,
     pub processing: Mutex<()>,
     pub client_health_scores: ClientHealthScores,
+    pub advertised_ip: Option<SocketAddr>,
     last_seen_block_reader: watch::Receiver<Hash>,
     last_seen_block_writer: watch::Sender<Hash>,
     last_seen_transactions_reader: watch::Receiver<VecDeque<TransactionId>>,
@@ -39,7 +40,7 @@ pub struct NodeState {
 }
 
 impl NodeState {
-    pub fn new_empty() -> SharedNodeState {
+    pub fn new_empty(advertised_ip: Option<SocketAddr>) -> SharedNodeState {
         let (last_seen_block_writer, last_seen_block_reader) =
             watch::channel(Hash::new_from_buf([0u8; 32]));
         let (last_seen_transactions_writer, last_seen_transactions_reader) =
@@ -51,6 +52,7 @@ impl NodeState {
             is_syncing: RwLock::new(false),
             chain_events: broadcast::channel(64).0,
             processing: Mutex::new(()),
+            advertised_ip,
             last_seen_block_reader,
             last_seen_block_writer,
             last_seen_transactions_reader,

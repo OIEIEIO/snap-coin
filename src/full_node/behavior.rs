@@ -74,7 +74,7 @@ impl PeerBehavior for FullNodePeerBehavior {
                 return Err(PeerError::Unknown("Got unhandled Ping".to_string()));
             }
             Command::GetPeers => {
-                let peers = node_state
+                let mut peers: Vec<String> = node_state
                     .connected_peers
                     .read()
                     .await
@@ -82,6 +82,11 @@ impl PeerBehavior for FullNodePeerBehavior {
                     .filter(|peer| !peer.is_client)
                     .map(|peer| peer.address.to_string())
                     .collect();
+                
+                // If this is a "public" node and the user provided it's external ip, we will advertise it to our peers
+                if let Some(advertised) = node_state.advertised_ip {
+                    peers.push(advertised.to_string());
+                }
                 message.make_response(Command::SendPeers { peers })
             }
             Command::SendPeers { .. } => {

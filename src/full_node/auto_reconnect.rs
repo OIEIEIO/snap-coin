@@ -17,6 +17,7 @@ pub fn start_auto_reconnect(
     blockchain: SharedBlockchain,
     resolved_peers: Vec<SocketAddr>,
     full_ibd: bool,
+    hashing_threads: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -30,7 +31,13 @@ pub fn start_auto_reconnect(
                         *node_state.is_syncing.write().await = true;
                         info!(
                             "Re-sync status: {:?}",
-                            ibd_blockchain(node_state.clone(), blockchain.clone(), full_ibd).await
+                            ibd_blockchain(
+                                node_state.clone(),
+                                blockchain.clone(),
+                                full_ibd,
+                                hashing_threads
+                            )
+                            .await
                         );
                         *node_state.is_syncing.write().await = false;
                     }

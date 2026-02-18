@@ -13,7 +13,7 @@ pub mod mempool;
 /// Stores current node state, shared between threads
 pub mod node_state;
 
-/// IBD Logic
+/// Initial Block Download (IBD) Logic
 pub mod ibd;
 
 /// Handles full node on message logic
@@ -22,14 +22,14 @@ mod behavior;
 /// Enforces longest chain rule, syncs to a peer that has a higher height
 mod sync;
 
-use flexi_logger::{Duplicate, FileSpec, Logger};
+use flexi_logger::{Duplicate, FileSpec, LogfileSelector, Logger};
 use futures::future::join_all;
 use log::{error, info};
 use num_bigint::BigUint;
 use std::{
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Once},
+    sync::{Arc, Once, OnceLock},
 };
 use tokio::net::TcpStream;
 
@@ -53,11 +53,14 @@ pub type SharedBlockchain = Arc<Blockchain>;
 
 static LOGGER_INIT: Once = Once::new();
 
-/// Creates a full node (SharedBlockchain and SharedNodeState), connecting to peers, accepting blocks and transactions
+static LOGGER_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Creates a full node (SharedBlockchain, SharedNodeState, log_path), connecting to peers, accepting blocks and transactions
 pub fn create_full_node(
     node_path: &str,
     disable_stdout: bool,
-) -> (SharedBlockchain, SharedNodeState) {
+    advertised_ip: Option<SocketAddr>,
+) -> (SharedBlockchain, SharedNodeState, PathBuf) {
     let node_path = PathBuf::from(node_path);
 
     LOGGER_INIT.call_once(|| {
@@ -72,12 +75,17 @@ pub fn create_full_node(
             logger = logger.duplicate_to_stderr(Duplicate::Info);
         }
 
-        logger.start().ok(); // Ignore errors if logger is already set
+        info!("Starting logger...");
 
-        info!("Logger initialized for node at {:?}", node_path);
+        if let Ok(logger) = logger.start()
+            && let Ok(log_files) = logger.existing_log_files(&LogfileSelector::default())
+        {
+            LOGGER_PATH.set(log_files[0].clone()).unwrap();
+            info!("Logger initialized for node at {:?}", log_files[0]);
+        }
     });
 
-    let node_state = NodeState::new_empty();
+    let node_state = NodeState::new_empty(advertised_ip);
     let node_state_expiry = node_state.clone();
     node_state
         .mempool
@@ -94,7 +102,11 @@ pub fn create_full_node(
             .expect("Failed to create node path"),
     );
 
-    (Arc::new(blockchain), node_state)
+    (
+        Arc::new(blockchain),
+        node_state,
+        LOGGER_PATH.get().unwrap().clone(),
+    )
 }
 
 /// Connect to a peer
@@ -166,7 +178,7 @@ pub async fn accept_block(
 
     // Validation
     blockchain::validate_block_timestamp(&new_block)?;
-    blockchain.add_block(new_block.clone(), false)?;
+    blockchain.add_block(new_block.clone(), false, false)?;
 
     // Mempool, spend transactions
     node_state

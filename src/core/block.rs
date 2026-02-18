@@ -147,6 +147,14 @@ impl Block {
         Ok(())
     }
 
+    /// Checks if block meta is valid without checking it's hash
+    pub fn check_meta_ignore_hash(&self) -> Result<(), BlockError> {
+        self.check_completeness()?;
+        self.validate_address_inclusion_filter()?;
+        self.validate_merkle_tree()?;
+        Ok(())
+    }
+
     /// Checks if this block is complete, and has all required fields to be valid on a blockchain
     pub fn check_completeness(&self) -> Result<(), BlockError> {
         self.meta

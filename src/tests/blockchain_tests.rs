@@ -52,7 +52,7 @@ async fn test_blockchain_rollback() -> Result<(), anyhow::Error> {
             ""
         );
 
-        bc.add_block(new_block.clone(), false)?;
+        bc.add_block(new_block.clone(), false, false)?;
         diff_log.insert(
             bc.block_store().get_height(),
             (bc.get_block_difficulty(), bc.get_transaction_difficulty()),
@@ -144,7 +144,7 @@ async fn test_transaction_validation() -> Result<(), anyhow::Error> {
     let mut block = build_block(&bc, &vec![], public).await?;
     #[allow(deprecated)]
     block.compute_pow()?;
-    bc.add_block(block, false)?;
+    bc.add_block(block, false, false)?;
 
     let mut valid_tx = build_transaction(&bc, private, vec![(public2, 10)], &vec![]).await?;
     valid_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
@@ -195,7 +195,7 @@ async fn test_mempool() -> Result<(), anyhow::Error> {
     let mut block = build_block(&bc, &vec![], public).await?;
     #[allow(deprecated)]
     block.compute_pow()?;
-    bc.add_block(block, false)?;
+    bc.add_block(block, false, false)?;
 
     let mut new_tx = build_transaction(&bc, private, vec![(public, 100)], &vec![]).await?;
     new_tx.compute_pow(&bc.get_transaction_difficulty(), None)?;
@@ -217,7 +217,7 @@ async fn test_mempool() -> Result<(), anyhow::Error> {
     let mut block = build_block(&bc, &mempool.get_mempool().await, public).await?;
     #[allow(deprecated)]
     block.compute_pow()?;
-    bc.add_block(block, false)?;
+    bc.add_block(block, false, false)?;
 
     assert!(
         !mempool.validate_transaction(&new_tx).await,
