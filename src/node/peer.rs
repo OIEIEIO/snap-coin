@@ -2,11 +2,11 @@
 // File: src/node/peer.rs
 // Project: snap-coin
 // Branch: fix/inbound-handshake
-// Version: 16.0.0-fix1
+// Version: 16.0.0-fix2
 // Description: Peer creation and task management.
-//              Added accept_peer() for inbound connections to fix v16 handshake
-//              regression where create_peer() was made initiator-only, causing
-//              both sides to send Connect and deadlock on AcknowledgeConnection.
+//              accept_peer() is now neutral - no handshake on inbound.
+//              behavior.rs handles Command::Connect in normal message flow,
+//              matching v15.2 behavior. create_peer() unchanged (outbound only).
 // Modified: 2026-03-28
 // =============================================================================
 
@@ -188,8 +188,9 @@ pub async fn create_peer(
     Ok(handle)
 }
 
-/// Inbound peer: waits for Connect, sends AcknowledgeConnectionWithFlags.
-/// Use this for connections accepted by the P2P server listener.
+/// Inbound peer: neutral setup, no handshake.
+/// behavior.rs handles Command::Connect in normal message flow.
+/// This matches v15.2 behavior and allows both old and new nodes to connect.
 pub async fn accept_peer(
     stream: TcpStream,
     behavior: SharedPeerBehavior,
@@ -201,38 +202,12 @@ pub async fn accept_peer(
 
     let (outgoing_tx, outgoing_rx) = mpsc::channel::<Outgoing>(64);
     let (kill, should_kill) = oneshot::channel::<KillSignal>();
-    let (mut reader, mut writer) = stream.into_split();
-
-    // Wait for the outbound side to send Connect
-    let incoming = Message::from_stream(&mut reader)
-        .await
-        .map_err(|_| PeerError::Unknown("Failed to receive connection request".to_string()))?;
-
-    let flags = match incoming.command {
-        Command::Connect => {
-            let ack = if incoming.version >= 4 {
-                incoming.make_response(Command::AcknowledgeConnectionWithFlags {
-                    flags: ConnectionFlags::FULL_NODE_CAPABILITY,
-                })
-            } else {
-                incoming.make_response(Command::AcknowledgeConnection)
-            };
-            ack.send(&mut writer)
-                .await
-                .map_err(|_| PeerError::Unknown("Failed to send connection ack".to_string()))?;
-            ConnectionFlags::FULL_NODE_CAPABILITY
-        }
-        _ => {
-            return Err(PeerError::Unknown(
-                "Expected Connect from inbound peer".to_string(),
-            ));
-        }
-    };
+    let (reader, writer) = stream.into_split();
 
     let handle = PeerHandle {
         send: outgoing_tx,
         kill: Arc::new(Mutex::new(Some(kill))),
-        flags,
+        flags: ConnectionFlags::FULL_NODE_CAPABILITY,
         is_client,
         address,
     };
