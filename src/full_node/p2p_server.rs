@@ -1,3 +1,15 @@
+// =============================================================================
+// File: src/full_node/p2p_server.rs
+// Project: snap-coin
+// Branch: fix/inbound-handshake
+// Version: 16.0.0-fix1
+// Description: P2P server listener for inbound peer connections.
+//              Swapped create_peer() -> accept_peer() for inbound sockets
+//              so the server-side handshake correctly waits for Connect
+//              and responds with AcknowledgeConnectionWithFlags.
+// Modified: 2026-03-28
+// =============================================================================
+
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -9,7 +21,7 @@ use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinHandle, time::sleep};
 
 use crate::{
     full_node::{SharedBlockchain, behavior::FullNodePeerBehavior, node_state::SharedNodeState},
-    node::peer::create_peer,
+    node::peer::accept_peer,
 };
 
 #[derive(Error, Debug)]
@@ -46,7 +58,7 @@ pub async fn start_p2p_server(
                     }
                 }
             }
-            match create_peer(
+            match accept_peer(
                 stream,
                 FullNodePeerBehavior::new(blockchain.clone(), node_state.clone()),
                 true,
@@ -61,9 +73,15 @@ pub async fn start_p2p_server(
                         .insert(address, handle);
                 }
                 Err(e) => {
-                    error!("Failed to connect to create (incoming) peer : {e}");
+                    error!("Failed to create incoming peer: {e}");
                 }
             }
         }
     }))
 }
+
+// =============================================================================
+// File: src/full_node/p2p_server.rs
+// Project: snap-coin / src/full_node/
+// Created: 2026-03-28T00:00:00Z
+// =============================================================================

@@ -1,3 +1,15 @@
+// =============================================================================
+// File: src/node/peer.rs
+// Project: snap-coin
+// Branch: fix/inbound-handshake
+// Version: 16.0.0-fix1
+// Description: Peer creation and task management.
+//              Added accept_peer() for inbound connections to fix v16 handshake
+//              regression where create_peer() was made initiator-only, causing
+//              both sides to send Connect and deadlock on AcknowledgeConnection.
+// Modified: 2026-03-28
+// =============================================================================
+
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use log::error;
@@ -129,7 +141,8 @@ impl PeerHandle {
     }
 }
 
-/// Create a new peer, start internal tasks, and return a PeerHandle
+/// Outbound peer: sends Connect, waits for AcknowledgeConnection/AcknowledgeConnectionWithFlags.
+/// Use this for peers dialed via --peers / connect_peer().
 pub async fn create_peer(
     stream: TcpStream,
     behavior: SharedPeerBehavior,
@@ -142,10 +155,12 @@ pub async fn create_peer(
     let (outgoing_tx, outgoing_rx) = mpsc::channel::<Outgoing>(64);
     let (kill, should_kill) = oneshot::channel::<KillSignal>();
     let (mut reader, mut writer) = stream.into_split();
+
     Message::new(Command::Connect)
         .send(&mut writer)
         .await
         .map_err(|_| PeerError::Unknown("Failed to send connection req".to_string()))?;
+
     let flags = match Message::from_stream(&mut reader)
         .await
         .map_err(|_| PeerError::Unknown("Failed to receive connection ack".to_string()))?
@@ -167,13 +182,81 @@ pub async fn create_peer(
         is_client,
         address,
     };
+
+    spawn_peer_tasks(handle.clone(), behavior, reader, writer, outgoing_rx, should_kill);
+
+    Ok(handle)
+}
+
+/// Inbound peer: waits for Connect, sends AcknowledgeConnectionWithFlags.
+/// Use this for connections accepted by the P2P server listener.
+pub async fn accept_peer(
+    stream: TcpStream,
+    behavior: SharedPeerBehavior,
+    is_client: bool,
+) -> Result<PeerHandle, PeerError> {
+    let address = stream
+        .peer_addr()
+        .map_err(|e| PeerError::Io(format!("IO error: {e}")))?;
+
+    let (outgoing_tx, outgoing_rx) = mpsc::channel::<Outgoing>(64);
+    let (kill, should_kill) = oneshot::channel::<KillSignal>();
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Wait for the outbound side to send Connect
+    let incoming = Message::from_stream(&mut reader)
+        .await
+        .map_err(|_| PeerError::Unknown("Failed to receive connection request".to_string()))?;
+
+    let flags = match incoming.command {
+        Command::Connect => {
+            let ack = if incoming.version >= 4 {
+                incoming.make_response(Command::AcknowledgeConnectionWithFlags {
+                    flags: ConnectionFlags::FULL_NODE_CAPABILITY,
+                })
+            } else {
+                incoming.make_response(Command::AcknowledgeConnection)
+            };
+            ack.send(&mut writer)
+                .await
+                .map_err(|_| PeerError::Unknown("Failed to send connection ack".to_string()))?;
+            ConnectionFlags::FULL_NODE_CAPABILITY
+        }
+        _ => {
+            return Err(PeerError::Unknown(
+                "Expected Connect from inbound peer".to_string(),
+            ));
+        }
+    };
+
+    let handle = PeerHandle {
+        send: outgoing_tx,
+        kill: Arc::new(Mutex::new(Some(kill))),
+        flags,
+        is_client,
+        address,
+    };
+
+    spawn_peer_tasks(handle.clone(), behavior, reader, writer, outgoing_rx, should_kill);
+
+    Ok(handle)
+}
+
+/// Shared task spawner used by both create_peer() and accept_peer()
+fn spawn_peer_tasks(
+    handle: PeerHandle,
+    behavior: SharedPeerBehavior,
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    outgoing_rx: Receiver<Outgoing>,
+    should_kill: oneshot::Receiver<KillSignal>,
+) {
     let my_handle = handle.clone();
 
     tokio::spawn(async move {
         let behavior_on_kill = behavior.clone();
         let my_handle_on_kill = my_handle.clone();
         if let Err(e) = async move {
-
             let pending: Pending =
                 Arc::new(Mutex::new(HashMap::<MessageId, oneshot::Sender<Message>>::new()));
 
@@ -197,11 +280,8 @@ pub async fn create_peer(
                 behavior_on_kill.on_kill(&my_handle_on_kill).await;
                 error!("Peer error (disconnected): {e}");
             });
-
         }
     });
-
-    Ok(handle)
 }
 
 async fn reader_task(
@@ -257,3 +337,9 @@ async fn pinger_task(my_handle: PeerHandle, behavior: SharedPeerBehavior) -> Res
             .await?;
     }
 }
+
+// =============================================================================
+// File: src/node/peer.rs
+// Project: snap-coin / src/node/
+// Created: 2026-03-28T00:00:00Z
+// =============================================================================
